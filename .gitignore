@@ -1,0 +1,28 @@
+# Logs (runtime output — directory tracked, contents ignored)
+logs/*
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Data artifacts (snapshots/large data live outside VCS unless explicitly tracked)
+*.tmp
+
+# Claude Code internal state
+.claude/

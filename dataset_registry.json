@@ -1,0 +1,5 @@
+{
+  "registry_version": "v0.1.0",
+  "description": "Authoritative index of all datasets. A dataset is not real until registered here. See DATA_CONTRACT.md for field rules.",
+  "datasets": []
+}
