@@ -4,8 +4,8 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 3 (Validation Foundation) — complete, awaiting review.
-> **Version:** `v0.4.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 4 (Universe Metadata Ingestion MVP) — complete, awaiting review.
+> **Version:** `v0.5.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,7 +30,7 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.4.0)
+├── VERSION                 # Semantic version (v0.5.0)
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -47,7 +47,9 @@ crypto-data-hub/
 │   └── validation_framework.md       # Validation framework (Phase 3)
 │
 ├── datahub/                # Core platform package
+│   ├── ingestion/          # Universe Metadata ingestion MVP
 │   └── validation/         # Executable validation framework
+├── data/                   # Small committed reference artifacts
 ├── scripts/                # Automation scripts
 ├── tests/                  # Test suite and fixtures
 ├── reports/                # Generated reports (future)
@@ -79,6 +81,7 @@ Run current validation checks from repo root:
 
 ```bash
 python -m datahub.validation --all
+python -m datahub.ingestion.universe_metadata --offline --all
 python -m unittest discover tests
 ```
 

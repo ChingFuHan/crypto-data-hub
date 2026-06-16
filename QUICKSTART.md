@@ -2,8 +2,8 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 3 (Validation Foundation) — executable validation
-> exists; Universe Metadata remains `draft`; no data ingestion yet.
+> **Current phase:** Phase 4 (Universe Metadata Ingestion MVP) — first validated
+> draft artifact exists; Universe Metadata lifecycle remains `draft`.
 
 ---
 
@@ -29,14 +29,15 @@ Data plane:  DATA_CONTRACT.md · dataset_registry.json · DATA_CATALOG.md
 Code plane:  datahub/ · scripts/ · tests/ · reports/ · examples/ · logs/ · docs/
 ```
 
-The validation package now lives in `datahub/validation/`; data ingestion and
-snapshot directories remain future work.
+The validation package lives in `datahub/validation/`; Universe Metadata
+ingestion lives in `datahub/ingestion/`. Snapshot publication remains future
+work.
 
 ---
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.4.0`).
+- Version: see `VERSION` (currently `v0.5.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -62,8 +63,9 @@ python -m json.tool dataset_registry.json
 
 It currently holds **1 dataset** (`reference.universe.metadata`, `draft`) plus the
 `conventions` and `dataset_entry_schema` blocks (the machine-readable registry
-contract). See `docs/registry_standard.md` for how entries are structured and
-discovered, and `docs/universe_metadata_dataset.md` for the dataset design.
+contract). The registry points to the Phase 4 draft artifact and manifest. See
+`docs/registry_standard.md` for how entries are structured and discovered, and
+`docs/universe_metadata_dataset.md` for the dataset design.
 
 ## 6. Run validation
 
@@ -73,3 +75,33 @@ python -m unittest discover tests
 ```
 
 If your environment exposes only `python3`, use `python3 -m ...`.
+
+## 7. Run Universe Metadata ingestion
+
+Online source fetch + normalize + validate:
+
+```bash
+python -m datahub.ingestion.universe_metadata --all
+```
+
+Offline deterministic re-run from committed raw snapshot:
+
+```bash
+python -m datahub.ingestion.universe_metadata --offline --all
+```
+
+Individual commands:
+
+```bash
+python -m datahub.ingestion.universe_metadata --fetch
+python -m datahub.ingestion.universe_metadata --normalize
+```
+
+Current artifact locations:
+
+- Raw snapshot: `data/raw/reference/universe_metadata/`
+- Normalized artifact: `data/reference/universe_metadata/reference.universe.metadata.json`
+- Manifest: `data/manifests/reference/universe_metadata/manifest.json`
+
+Committed data artifacts are intentionally small reference artifacts for offline
+validation. Large market data remains out of scope.

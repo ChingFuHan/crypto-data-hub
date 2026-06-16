@@ -7,6 +7,50 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.5.0] — 2026-06-16
+
+### Added — Phase 4: Universe Metadata Ingestion MVP
+
+- **Source authority review** for Binance USD-M Futures `exchangeInfo`, Binance
+  public archive index, and Binance announcements
+  (`docs/universe_metadata_sources.md`).
+- **Universe Metadata ingestion CLI** with online fetch, normalization, full run,
+  and deterministic offline mode:
+  `python -m datahub.ingestion.universe_metadata`.
+- **Immutable raw source snapshot** under `data/raw/reference/universe_metadata/`
+  with source metadata and raw response checksum.
+- **Normalized draft artifact** at
+  `data/reference/universe_metadata/reference.universe.metadata.json`.
+- **Manifest and checksum metadata** at
+  `data/manifests/reference/universe_metadata/manifest.json`.
+- **Validation integration** for the normalized artifact through the Phase 3
+  Universe Metadata validator.
+- **Ingestion tests and fixtures** for deterministic ids, normalization,
+  manifest/checksum generation, offline mode, idempotency, raw snapshot naming,
+  and raw snapshot reuse.
+
+### Changed
+
+- Bumped repo version `v0.4.0` → `v0.5.0`.
+- Updated `dataset_registry.json` and `DATA_CATALOG.md` to point to the first
+  validated draft artifact while keeping dataset lifecycle `status = draft`.
+- Kept `registry_version = v0.2.0`; no registry contract shape change.
+- Updated `DATA_CONTRACT.md`, `docs/universe_metadata_dataset.md`,
+  `docs/validation_framework.md`, `QUICKSTART.md`, `AGENTS.md`, and
+  `HANDOFF.md` with Phase 4 decisions and validation commands.
+
+### Known Gaps
+
+- Coverage is `active_current` only for Binance USD-M Futures `TRADING` symbols.
+- Historical delisted, renamed, and merged lifecycle events are not ingested.
+- `contract_validated` remains `false`; artifact validation success does not
+  imply lifecycle promotion.
+- No snapshot publication, CI workflow, or catalog generation exists yet.
+
+[v0.5.0]: #
+
+---
+
 ## [v0.4.0] — 2026-06-16
 
 ### Added — Phase 3: Validation Foundation

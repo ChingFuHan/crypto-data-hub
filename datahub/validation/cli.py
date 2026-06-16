@@ -12,7 +12,10 @@ from .registry import validate_registry_file
 from .result import ValidationReport
 from .universe_metadata import validate_fixture
 
-DEFAULT_UNIVERSE_FIXTURE = (
+DEFAULT_UNIVERSE_ARTIFACT = (
+    "data/reference/universe_metadata/reference.universe.metadata.json"
+)
+FALLBACK_UNIVERSE_FIXTURE = (
     "tests/fixtures/universe_metadata/valid_universe_metadata.json"
 )
 
@@ -40,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def default_universe_fixture() -> Path:
+    artifact = Path(DEFAULT_UNIVERSE_ARTIFACT)
+    if artifact.exists():
+        return artifact
+    return Path(FALLBACK_UNIVERSE_FIXTURE)
+
+
 def run(args: argparse.Namespace) -> ValidationReport:
     if args.all and args.fixture:
         raise ValidationCommandError("--all does not accept --fixture")
@@ -48,7 +58,7 @@ def run(args: argparse.Namespace) -> ValidationReport:
         report = ValidationReport()
         report.extend(validate_registry_file("dataset_registry.json"))
         report.extend(validate_lifecycle("dataset_registry.json", "."))
-        fixture = Path(DEFAULT_UNIVERSE_FIXTURE)
+        fixture = default_universe_fixture()
         if not fixture.exists():
             raise ValidationCommandError(f"default fixture not found: {fixture}")
         report.extend(validate_fixture(fixture))

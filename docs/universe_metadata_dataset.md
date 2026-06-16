@@ -10,9 +10,10 @@ crypto-data-hub and exists to **validate that the Phase 1 governance framework
 (contract, metadata, registry, catalog, lifecycle) actually supports a real
 dataset.**
 
-> **Status note:** this is a **design**. The dataset is registered as `draft`
-> with `quality.contract_validated = false`; **no data has been ingested in
-> Phase 2**. Ingestion and validation belong to a later phase.
+> **Status note:** the dataset is still registered as `draft` with
+> `quality.contract_validated = false`. Phase 4 produced the first validated
+> draft artifact for current Binance USD-M Futures symbols, but this does not
+> promote the dataset lifecycle to `active`.
 
 ---
 
@@ -99,8 +100,8 @@ This section covers the **dataset** lifecycle (the registry `status`), per
 
 | Stage | Meaning for Universe Metadata |
 |-------|-------------------------------|
-| **建立 / Create** | Registered as `draft` with the schema above. (Current state in Phase 2 — design only.) |
-| **更新 / Update** | After ingestion + contract validation, moves `draft → active`. Refreshed **daily** as instruments list/delist/rename/merge. |
+| **建立 / Create** | Registered as `draft` with the schema above. Phase 4 adds a validated draft artifact. |
+| **更新 / Update** | After full ingestion + contract validation + review, moves `draft → active`. Refreshed **daily** as instruments list/delist/rename/merge. |
 | **廢棄 / Deprecate** | `active → deprecated` if superseded by a better universe source; existing consumers keep reading, no new adoption. |
 | **歸檔 / Archive** | `deprecated → archived`; frozen and retained for reproducibility (terminal). |
 
@@ -131,17 +132,18 @@ The dataset's metadata lives **inside its `dataset_registry.json` entry** (see
 | `version` | `v0.1.0` |
 | `status` | `draft` |
 | `owner` | `data-platform` |
-| `source` | `type: api` — exchange instrument/`exchangeInfo` endpoints (aggregated) |
+| `source` | `type: api` — Binance USD-M Futures `exchangeInfo` |
 | `timezone` | `UTC` |
 | `update_frequency` | `daily` |
 | `primary_key` | `["instrument_id"]` |
 | `schema_ref` | `DATA_CONTRACT.md#contract-universe-metadata` |
 | `tags` | `["reference", "universe", "symbols", "lifecycle"]` |
 
-`earliest_timestamp` / `latest_timestamp` are `null` in the draft (no data yet);
-once published they become `MIN(listed_at)` and
-`MAX(COALESCE(delisted_at, now))` respectively. `provenance` is recorded at
-design stage with `contract_validated = false`.
+Phase 4 registry timestamps describe the validated draft artifact:
+`earliest_timestamp = MIN(listed_at)` and `latest_timestamp = retrieved_at`.
+`provenance` points to the raw snapshot, normalized artifact, and manifest.
+`contract_validated` remains `false` until review decides lifecycle promotion
+semantics.
 
 ---
 
@@ -154,11 +156,31 @@ under `datasets[]`. It conforms to `dataset_entry_schema`
 - `primary_key` in the entry = `["instrument_id"]`, matching the schema PK above.
 - `schema_ref` points to this dataset's contract section in `DATA_CONTRACT.md`.
 - `status = draft` and `quality.contract_validated = false` because no data has
-  been validated yet.
+  been validated for lifecycle promotion yet. The Phase 4 artifact itself has
+  passed fixture validation.
 - `lineage.upstream = []` — Universe Metadata is a **root** reference dataset; its
   sources are external exchange APIs, not other registered datasets.
 - The human-readable [DATA_CATALOG.md](../DATA_CATALOG.md) entry is the derived
   view of this registry record and must stay in sync with it.
+
+### Phase 4 Artifact
+
+Current validated draft artifact:
+
+- Raw snapshot:
+  `data/raw/reference/universe_metadata/exchange_info_20260616T170138Z_d4d2d2ab1c6e.json`
+- Normalized artifact:
+  `data/reference/universe_metadata/reference.universe.metadata.json`
+- Manifest:
+  `data/manifests/reference/universe_metadata/manifest.json`
+- Coverage: `active_current`
+- Rows: 671
+- Artifact checksum:
+  `fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39`
+
+Coverage status is recorded in the manifest/provenance layer and is separate
+from row `status`. Phase 4 emits only `active` rows derived from Binance
+`status = TRADING`.
 
 ---
 
@@ -181,6 +203,20 @@ These rules are recorded in the dataset's contract section of
 `DATA_CONTRACT.md` and are checked **before** the dataset may move
 `draft → active`.
 
+Phase 4 validation command:
+
+```bash
+python -m datahub.validation --target universe-metadata --fixture data/reference/universe_metadata/reference.universe.metadata.json
+```
+
+Offline deterministic verification:
+
+```bash
+python -m datahub.ingestion.universe_metadata --offline --all
+python -m datahub.validation --all
+python -m unittest discover tests
+```
+
 ---
 
 ## Cross-References
@@ -189,4 +225,5 @@ These rules are recorded in the dataset's contract section of
 - [DATA_CONTRACT.md](../DATA_CONTRACT.md) — the Universe Metadata contract + framework.
 - [dataset_registry.json](../dataset_registry.json) — authoritative registry entry.
 - [DATA_CATALOG.md](../DATA_CATALOG.md) — derived human-readable catalog entry.
+- [universe_metadata_sources.md](universe_metadata_sources.md) — source authority review and Phase 4 ingestion decisions.
 - [metadata_standard.md](metadata_standard.md) · [registry_standard.md](registry_standard.md) · [dataset_lifecycle.md](dataset_lifecycle.md) · [naming_convention.md](naming_convention.md) — the governance standards this design exercises.

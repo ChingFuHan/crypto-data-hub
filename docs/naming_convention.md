@@ -21,7 +21,7 @@ A single, consistent style applies across the whole repository:
 | `docs/` files | `snake_case` with `.md` extension | `dataset_lifecycle.md` |
 | Data / config files | `snake_case` | `dataset_registry.json` |
 | Directories | lowercase `snake_case` short nouns | `scripts`, `reports` |
-| Versions | SemVer, `v`-prefixed | `v0.4.0` |
+| Versions | SemVer, `v`-prefixed | `v0.5.0` |
 
 Rule of thumb: **identifiers and filesystem names are lowercase and machine-friendly; only human-facing display text (`dataset_name`) uses Title Case.**
 
@@ -122,7 +122,7 @@ File names fall into two classes:
 
 - **Scheme:** Semantic Versioning, `v`-prefixed: `vMAJOR.MINOR.PATCH`.
 - **Pattern (authoritative):** `^v[0-9]+\.[0-9]+\.[0-9]+$`
-- The current repo version is `v0.4.0`.
+- The current repo version is `v0.5.0`.
 
 Dataset version increments (see [DATA_CONTRACT.md](../DATA_CONTRACT.md)):
 

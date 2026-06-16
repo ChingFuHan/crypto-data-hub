@@ -1,23 +1,25 @@
 # Validation Framework
 
-> Phase 3 Validation Foundation. Subordinate to [ROOT.md](../ROOT.md) and
-> [DATA_CONTRACT.md](../DATA_CONTRACT.md). If anything here conflicts with a
-> higher-priority document, the higher-priority document wins.
+> Phase 3 Validation Foundation plus Phase 4 artifact integration. Subordinate
+> to [ROOT.md](../ROOT.md) and [DATA_CONTRACT.md](../DATA_CONTRACT.md). If
+> anything here conflicts with a higher-priority document, the higher-priority
+> document wins.
 
 ---
 
 ## Validation Scope
 
-Phase 3 turns core governance rules into executable checks. Current scope:
+Phase 3 turned core governance rules into executable checks. Phase 4 adds
+Universe Metadata artifact validation. Current scope:
 
 - `dataset_registry.json`
 - Dataset entry schema rules declared in the registry
 - Dataset lifecycle rules from `docs/dataset_lifecycle.md`
 - Dataset-related naming rules from `docs/naming_convention.md`
-- Universe Metadata fixture validation for Q1-Q6 plus point-in-time reconstruction
+- Universe Metadata artifact/fixture validation for Q1-Q6 plus point-in-time reconstruction
 
-Phase 3 does **not** ingest external data, publish snapshots, or move Universe
-Metadata from `draft` to `active`.
+Phase 4 adds a validated draft Universe Metadata artifact. Validation still does
+not move Universe Metadata from `draft` to `active`.
 
 ---
 
@@ -55,7 +57,7 @@ Rule organization:
 - `registry.py` validates the registry file and dataset entry metadata.
 - `lifecycle.py` validates lifecycle state and state-specific requirements.
 - `naming.py` validates dataset ids, versions, references, paths, and timestamps.
-- `universe_metadata.py` validates Universe Metadata fixtures.
+- `universe_metadata.py` validates Universe Metadata artifacts/fixtures.
 - `result.py` defines the result/report model shared by all validators.
 
 ---
@@ -121,6 +123,7 @@ python -m datahub.validation
 python -m datahub.validation --target registry
 python -m datahub.validation --all
 python -m datahub.validation --target universe-metadata --fixture tests/fixtures/universe_metadata/valid_universe_metadata.json
+python -m datahub.validation --target universe-metadata --fixture data/reference/universe_metadata/reference.universe.metadata.json
 python -m unittest discover tests
 ```
 
@@ -151,13 +154,13 @@ python -m datahub.validation --target registry
 
 Runs registry, lifecycle, and naming checks against repo files.
 
-Universe Metadata fixture target:
+Universe Metadata artifact/fixture target:
 
 ```bash
 python -m datahub.validation --target universe-metadata --fixture tests/fixtures/universe_metadata/valid_universe_metadata.json
 ```
 
-Validates one fixture file.
+Validates one artifact or fixture file.
 
 All target:
 
@@ -165,7 +168,10 @@ All target:
 python -m datahub.validation --all
 ```
 
-Runs registry checks plus the default valid Universe Metadata fixture.
+Runs registry checks plus the default Universe Metadata artifact/fixture.
+If `data/reference/universe_metadata/reference.universe.metadata.json` exists,
+`--all` validates that Phase 4 artifact; otherwise it falls back to
+`tests/fixtures/universe_metadata/valid_universe_metadata.json`.
 
 ---
 
@@ -177,7 +183,20 @@ Runs registry checks plus the default valid Universe Metadata fixture.
 
 ---
 
-## Test Fixtures
+## Test Fixtures And Artifact
+
+Phase 4 artifact:
+
+```text
+data/reference/universe_metadata/reference.universe.metadata.json
+```
+
+Raw source snapshot and manifest:
+
+```text
+data/raw/reference/universe_metadata/
+data/manifests/reference/universe_metadata/manifest.json
+```
 
 Universe Metadata fixtures live under:
 
@@ -195,7 +214,8 @@ Current fixtures:
 - `cyclic_successor_graph.json`
 - `broken_point_in_time_reconstruction.json`
 
-Fixtures are synthetic and local. They do not represent ingested exchange data.
+Fixtures are synthetic and local. The Phase 4 artifact is generated from the
+committed raw Binance USD-M Futures `exchangeInfo` snapshot.
 
 ---
 
@@ -247,25 +267,37 @@ Universe Metadata validation:
 - `UM-Q6` successor reference and acyclic graph rules
 - `UM-PIT` symbol-era interval overlap and rename handoff rule
 
+Phase 4 ingestion integration:
+
+- `python -m datahub.ingestion.universe_metadata --fetch`
+- `python -m datahub.ingestion.universe_metadata --normalize`
+- `python -m datahub.ingestion.universe_metadata --all`
+- `python -m datahub.ingestion.universe_metadata --offline --all`
+- raw snapshot reuse by checksum
+- deterministic artifact and manifest regeneration from committed raw snapshot
+
 ---
 
 ## Known Gaps
 
-- No external Universe Metadata ingestion exists yet.
-- No active dataset artifact exists; active/deprecated/archived lifecycle checks
-  are skeletons until later phases create those states.
+- Only the first draft Universe Metadata artifact exists; dataset lifecycle
+  remains `draft`.
+- Active/deprecated/archived lifecycle checks are skeletons until later phases
+  create those states.
 - No JSON Schema file exists for `dataset_registry.json`.
 - No CI workflow runs validation yet.
 - `DATA_CATALOG.md` is not generated from the registry yet.
 - Snapshot validation awaits snapshot implementation.
 - Validation report files under `reports/` are not generated yet.
+- Historical delisted, renamed, and merged Universe Metadata rows are not
+  ingested yet.
 
 ---
 
 ## Future Work
 
-- Ingest and validate real Universe Metadata data.
-- Move Universe Metadata `draft → active` after validation and review.
+- Expand Universe Metadata ingestion to historical lifecycle coverage.
+- Decide whether/when Universe Metadata can move `draft → active` after review.
 - Add JSON Schema and CI.
 - Generate `DATA_CATALOG.md` from `dataset_registry.json`.
 - Add snapshot creation, checksums, and snapshot validation.

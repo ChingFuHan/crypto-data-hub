@@ -1,0 +1,27 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1710000000000,
+  "futuresType": "U_MARGINED",
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "pair": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "marginAsset": "USDT",
+      "onboardDate": 1567965300000,
+      "filters": [
+        {
+          "filterType": "PRICE_FILTER",
+          "tickSize": "0.10"
+        },
+        {
+          "filterType": "LOT_SIZE",
+          "stepSize": "0.001"
+        }
+      ]
+    }
+  ]
+}

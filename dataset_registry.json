@@ -164,12 +164,12 @@
             "owner": "data-platform",
             "source": {
                 "type": "api",
-                "reference": "exchange instrument / exchangeInfo endpoints (aggregated)"
+                "reference": "https://fapi.binance.com/fapi/v1/exchangeInfo (Binance USD-M Futures)"
             },
             "timezone": "UTC",
             "update_frequency": "daily",
-            "earliest_timestamp": null,
-            "latest_timestamp": null,
+            "earliest_timestamp": "2019-09-08T17:55:00Z",
+            "latest_timestamp": "2026-06-16T17:01:38Z",
             "schema_ref": "DATA_CONTRACT.md#contract-universe-metadata",
             "primary_key": ["instrument_id"],
             "lineage": {
@@ -177,14 +177,28 @@
                 "transformation": "Aggregated and normalized from per-exchange instrument metadata APIs. Root reference dataset; no upstream registered datasets."
             },
             "provenance": {
-                "code_version": "v0.3.0",
+                "code_version": "v0.5.0",
                 "params": {
-                    "note": "design only; no ingestion in Phase 2",
-                    "exchanges": [],
-                    "as_of": null
+                    "phase": "Phase 4 Universe Metadata Ingestion MVP",
+                    "artifact": "data/reference/universe_metadata/reference.universe.metadata.json",
+                    "manifest": "data/manifests/reference/universe_metadata/manifest.json",
+                    "raw_snapshot": "data/raw/reference/universe_metadata/exchange_info_20260616T170138Z_d4d2d2ab1c6e.json",
+                    "source": "Binance USD-M Futures exchangeInfo",
+                    "source_identifier": "https://fapi.binance.com/fapi/v1/exchangeInfo",
+                    "coverage_status": "active_current",
+                    "row_count": 671,
+                    "artifact_validation": {
+                        "status": "passed",
+                        "validated_at": "2026-06-16T17:01:38Z",
+                        "command": "python -m datahub.validation --target universe-metadata --fixture data/reference/universe_metadata/reference.universe.metadata.json"
+                    },
+                    "known_coverage_gaps": [
+                        "Only current Binance USD-M Futures TRADING symbols are covered.",
+                        "Historical delisted, renamed, and merged lifecycle events are not covered in Phase 4."
+                    ]
                 },
-                "generated_by": "design",
-                "checksum": ""
+                "generated_by": "datahub.ingestion.universe_metadata",
+                "checksum": "fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39"
             },
             "snapshot": null,
             "quality": {
@@ -193,7 +207,7 @@
             },
             "tags": ["reference", "universe", "symbols", "lifecycle"],
             "created_at": "2026-06-16T00:00:00Z",
-            "updated_at": "2026-06-16T00:00:00Z"
+            "updated_at": "2026-06-16T17:01:38Z"
         }
     ]
 }

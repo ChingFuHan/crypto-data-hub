@@ -1,0 +1,18 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1710000000000,
+  "futuresType": "U_MARGINED",
+  "symbols": [
+    {
+      "symbol": "NOFILTERUSDT",
+      "pair": "NOFILTERUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "NOFILTER",
+      "quoteAsset": "USDT",
+      "marginAsset": "USDT",
+      "onboardDate": 1700000000000,
+      "filters": []
+    }
+  ]
+}

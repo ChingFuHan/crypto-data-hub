@@ -1,0 +1,118 @@
+{
+  "dataset_id": "reference.universe.metadata",
+  "dataset_version": "v0.1.0",
+  "generated_at": "2026-06-16T17:01:38Z",
+  "source_count": 1,
+  "row_count": 671,
+  "raw_sources": [
+    {
+      "source_name": "binance_usd_m_futures_exchange_info",
+      "source_type": "api",
+      "source_identifier": "https://fapi.binance.com/fapi/v1/exchangeInfo",
+      "path": "data/raw/reference/universe_metadata/exchange_info_20260616T170138Z_d4d2d2ab1c6e.json",
+      "retrieved_at": "2026-06-16T17:01:38Z",
+      "checksum": "d4d2d2ab1c6e086b4d1744ecbc09096fd94f99d463ea73a53b0fdbc284f6c599",
+      "snapshot_checksum": "f224d77ec464e20d5d66b836b685bdb613054b8f7574c94afe3d4258526eaa2d",
+      "record_count": 792,
+      "coverage_notes": [
+        "Authoritative for current Binance USD-M Futures exchangeInfo symbols returned with status TRADING.",
+        "Not authoritative for full historical delist, rename, or merge lifecycle."
+      ]
+    }
+  ],
+  "normalized_artifact": {
+    "path": "data/reference/universe_metadata/reference.universe.metadata.json",
+    "format": "json_array",
+    "checksum": "fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39",
+    "row_count": 671,
+    "coverage_status": "active_current"
+  },
+  "checksum": "fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39",
+  "validation_command": "python -m datahub.validation --target universe-metadata --fixture data/reference/universe_metadata/reference.universe.metadata.json",
+  "validation_status": {
+    "status": "passed",
+    "total_checks": 8,
+    "passed_checks": 8,
+    "failed_checks": 0,
+    "warning_checks": 0,
+    "error_rule_ids": []
+  },
+  "coverage": {
+    "implemented": [
+      "active_current"
+    ],
+    "historical_candidate": "not_implemented",
+    "unresolved": [
+      "Historical delisted symbols not covered by exchangeInfo current endpoint.",
+      "Renames and merges require announcement/archive evidence in later phases."
+    ],
+    "not_supported_yet": [
+      "Full point-in-time historical universe reconstruction.",
+      "Confirmed delisted/renamed/merged lifecycle events."
+    ]
+  },
+  "field_provenance": {
+    "instrument_id": {
+      "source": "derived from exchange, market_type, symbol, listed_at",
+      "confidence": "high"
+    },
+    "symbol": {
+      "source": "exchangeInfo.symbol",
+      "confidence": "high"
+    },
+    "exchange": {
+      "source": "ingestion constant: binance",
+      "confidence": "high"
+    },
+    "base_asset": {
+      "source": "exchangeInfo.baseAsset",
+      "confidence": "high"
+    },
+    "quote_asset": {
+      "source": "exchangeInfo.quoteAsset",
+      "confidence": "high"
+    },
+    "market_type": {
+      "source": "exchangeInfo.contractType",
+      "confidence": "high"
+    },
+    "contract_type": {
+      "source": "USD-M Futures product class; normalized as linear",
+      "confidence": "high"
+    },
+    "status": {
+      "source": "exchangeInfo.status == TRADING",
+      "confidence": "high"
+    },
+    "listed_at": {
+      "source": "exchangeInfo.onboardDate",
+      "confidence": "high"
+    },
+    "delisted_at": {
+      "source": "null because artifact covers current active symbols only",
+      "confidence": "high"
+    },
+    "successor_id": {
+      "source": "null because exchangeInfo current endpoint has no rename/merge relation",
+      "confidence": "medium"
+    },
+    "tick_size": {
+      "source": "exchangeInfo.filters.PRICE_FILTER.tickSize",
+      "confidence": "high"
+    },
+    "step_size": {
+      "source": "exchangeInfo.filters.LOT_SIZE.stepSize",
+      "confidence": "high"
+    },
+    "contract_size": {
+      "source": "normalization convention: 1 base asset quantity unit for USD-M linear futures",
+      "confidence": "medium"
+    }
+  },
+  "known_coverage_gaps": [
+    "Only Binance USD-M Futures current TRADING symbols are normalized.",
+    "Historical listed/delisted/renamed/merged events are not ingested.",
+    "contract_size is a documented normalization convention because exchangeInfo does not expose a separate contract-size field."
+  ],
+  "manifest_checksum": "cd40840b48a46b1a844ce015e548d3ece82eba733ef2f4fea0ffba1adc9444f3"
+}

@@ -1,0 +1,13 @@
+{
+  "source_name": "binance_data_vision_archive_index",
+  "source_type": "archive_index",
+  "coverage_status": "historical_candidate",
+  "candidates": [
+    {
+      "symbol": "BTCUSDT",
+      "path": "data/futures/um/monthly/klines/BTCUSDT/",
+      "confidence": "candidate_only",
+      "note": "Archive index proves some historical file existence, not confirmed lifecycle event."
+    }
+  ]
+}

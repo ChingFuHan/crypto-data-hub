@@ -227,10 +227,11 @@ new contract. Fill every placeholder; do not leave a section blank. The
 | Machine-readable schema (JSON Schema) | Pending (later phase, after review) |
 
 The framework and reusable template are defined above. The first concrete
-contract — **Universe Metadata** — is defined below as a `draft`; it is **not yet
-contract-validated** (`quality.contract_validated = false`) because no data has
-been ingested. A contract moves its dataset `draft → active` only after passing
-the *Validation Policy*.
+contract — **Universe Metadata** — is defined below as a `draft`; Phase 4
+produced a validated draft artifact, but the dataset is **not yet
+contract-validated for lifecycle promotion** (`quality.contract_validated =
+false`). A contract moves its dataset `draft → active` only after passing the
+*Validation Policy* and review.
 
 ---
 
@@ -293,11 +294,24 @@ imputed or coerced — a missing required value fails loud (`ROOT.md` → *Fail 
 | Q5 | Invalid Contract Information | Range / domain | `spot` ⇒ `contract_type IS NULL`; `market_type ∈ {futures, perpetual}` ⇒ `contract_type ∈ {linear, inverse}`; `market_type = option` ⇒ `contract_type ∈ {call, put}`; derivatives ⇒ `contract_size > 0`; `tick_size`/`step_size > 0` when present. |
 | Q6 | Referential | Referential | every non-null `successor_id` resolves to an existing `instrument_id`, is not self-referential (`!= instrument_id`), and the rename/merge successor graph is acyclic and terminates at an `active` or `delisted` row. |
 
+> Phase 4 note: Binance USD-M Futures `exchangeInfo` does not expose a separate
+> contract-size field. The MVP artifact uses `contract_size = 1` as a documented
+> normalization convention for USD-M linear futures where the quantity unit is
+> the base asset. This keeps Q5 executable without inventing source-derived
+> lifecycle facts.
+
 ### Provenance & Snapshot
 
 - **Provenance** (design stage): `code_version = v0.3.0`, `params` records the
   exchange set + `as_of`, `generated_by = design (no ingestion in Phase 2)`,
   `checksum` empty until first artifact.
+- **Provenance** (Phase 4 draft artifact): `code_version = v0.5.0`, source =
+  Binance USD-M Futures `exchangeInfo`, manifest =
+  `data/manifests/reference/universe_metadata/manifest.json`, normalized
+  artifact =
+  `data/reference/universe_metadata/reference.universe.metadata.json`,
+  checksum =
+  `fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39`.
 - **Snapshot policy:** on first publication, snapshot identity =
   `reference.universe.metadata` + version + UTC timestamp; immutable, checksummed,
   bound to this contract version (`ROOT.md` → *Snapshot Principles*).

@@ -68,10 +68,13 @@ Each entry mirrors its registry record (including lifecycle `status`, which may 
 - **Name:** Universe Metadata
 - **Description:** Lifecycle and contract metadata for all tradable instruments, supporting point-in-time reconstruction of the tradable universe.
 - **Owner:** data-platform
-- **Source:** api — exchange instrument / exchangeInfo endpoints (aggregated)
+- **Source:** api — https://fapi.binance.com/fapi/v1/exchangeInfo (Binance USD-M Futures)
 - **Schema:** see `DATA_CONTRACT.md#contract-universe-metadata`
 - **Update Frequency:** daily
-- **Known Issues:** Draft design; no data ingested yet (`contract_validated = false`). `earliest_timestamp` / `latest_timestamp` are null until first publication.
+- **Artifact:** `data/reference/universe_metadata/reference.universe.metadata.json`
+- **Manifest:** `data/manifests/reference/universe_metadata/manifest.json`
+- **Validation:** first draft artifact validated successfully (`active_current` coverage, 671 rows, checksum `fcee6a125792598d19e4332c3acd848dd4c7e49551e1f1cef2ad09a73b533b39`).
+- **Known Issues:** Lifecycle remains `draft` and `contract_validated = false`; Phase 4 covers only current Binance USD-M Futures `TRADING` symbols. Historical delisted, renamed, and merged events are not covered.
 - **Status:** draft
 
 Full design: [`docs/universe_metadata_dataset.md`](docs/universe_metadata_dataset.md).
