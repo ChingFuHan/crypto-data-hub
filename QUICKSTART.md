@@ -2,9 +2,9 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 1 (Data Governance Foundation) — governance standards
-> defined; no executable pipeline yet. This guide covers onboarding and the
-> governance docs available today.
+> **Current phase:** Phase 2 (First Dataset Design — Universe Metadata) — the
+> first dataset is designed and registered as `draft`; no data ingested and no
+> executable pipeline yet. This guide covers onboarding and the governance docs.
 
 ---
 
@@ -36,7 +36,7 @@ The data-plane directories are skeletons in Phase 0 and fill in later phases.
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.2.0`).
+- Version: see `VERSION` (currently `v0.3.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -60,6 +60,7 @@ The registry is plain JSON and validates with any standard tool, e.g.:
 python -m json.tool dataset_registry.json
 ```
 
-It currently contains no datasets — only `conventions` and the
-`dataset_entry_schema` (the machine-readable registry contract). See
-`docs/registry_standard.md` for how entries are structured and discovered.
+It currently holds **1 dataset** (`reference.universe.metadata`, `draft`) plus the
+`conventions` and `dataset_entry_schema` blocks (the machine-readable registry
+contract). See `docs/registry_standard.md` for how entries are structured and
+discovered, and `docs/universe_metadata_dataset.md` for the dataset design.

@@ -30,7 +30,7 @@ The registry file is a single JSON object with the following top-level keys:
 | `updated_at` | string | Date the registry file was last updated. |
 | `conventions` | object | Shared rules referenced by all entries (see below). |
 | `dataset_entry_schema` | object | Field schema every `datasets[]` entry must satisfy. |
-| `datasets` | array | The registered dataset entries. **Currently empty (`[]`)** — 0 datasets registered. |
+| `datasets` | array | The registered dataset entries. Currently holds **1** entry (`reference.universe.metadata`, `draft`). |
 
 ### `conventions` block (actual current keys)
 
@@ -93,4 +93,4 @@ The registry is the index that tools query.
 - **Lineage traversal:** `lineage.upstream` lists upstream `dataset_id`s, enabling dependency and impact analysis across registered datasets.
 - **Catalog rule:** [DATA_CATALOG.md](../DATA_CATALOG.md) must never list an unregistered dataset. If it appears in the catalog, it exists in the registry.
 
-Discovery operates only over entries present in `datasets[]`. As the registry currently holds 0 datasets, all queries return empty until the first entry is registered.
+Discovery operates only over entries present in `datasets[]`. The registry currently holds **1** dataset (`reference.universe.metadata`); see `DATA_CATALOG.md` for the human-readable view.

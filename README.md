@@ -4,8 +4,8 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 1 (Data Governance Foundation) — complete, awaiting review.
-> **Version:** `v0.2.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 2 (First Dataset Design — Universe Metadata) — complete, awaiting review.
+> **Version:** `v0.3.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,7 +30,7 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.2.0)
+├── VERSION                 # Semantic version (v0.3.0)
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -42,7 +42,8 @@ crypto-data-hub/
 │   ├── metadata_standard.md    # Metadata fields, types, rules
 │   ├── registry_standard.md    # Registry structure, versioning, discovery
 │   ├── authority_model.md      # Authority + sync + update model
-│   └── naming_convention.md    # Naming rules
+│   ├── naming_convention.md    # Naming rules
+│   └── universe_metadata_dataset.md  # First dataset design (Phase 2)
 │
 ├── datahub/                # Core platform package (future)
 ├── scripts/                # Automation scripts (future)

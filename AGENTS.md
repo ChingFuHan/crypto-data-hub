@@ -7,58 +7,57 @@
 
 ## Current Phase
 
-**Phase 1 — Data Governance Foundation** (complete, awaiting review).
+**Phase 2 — First Dataset Design (Universe Metadata)** (complete, awaiting review).
 
 Delivery model: Architecture First → MVP First → Incremental Delivery →
-Review Before Expansion. **Do not start Phase 2 without review approval.**
+Review Before Expansion. **Do not start Phase 3 without review approval.**
 
 ---
 
 ## Current Status
 
-- Repo version: `v0.2.0`.
-- Phase 0 (Repository Foundation) complete and reviewed; committed as `v0.1.0`.
-- Phase 1 delivered the shared **data governance model** every future dataset
-  must follow:
-  - Dataset Lifecycle Model — `docs/dataset_lifecycle.md`
-  - Dataset Metadata Standard — `docs/metadata_standard.md`
-  - Dataset Registry Standard — `docs/registry_standard.md`
-  - Authority Model — `docs/authority_model.md`
-  - Naming Convention Standard — `docs/naming_convention.md`
-  - Dataset Contract Framework — `DATA_CONTRACT.md`
-  - Data Catalog Framework — `DATA_CATALOG.md`
-  - Machine-readable registry contract — `dataset_registry.json`
-    (`conventions` + `dataset_entry_schema`)
-- Still **0 datasets registered** and no executable code (by design).
-- Awaiting Phase 1 review before any Phase 2 work begins.
+- Repo version: `v0.3.0`. `registry_version` stays `v0.2.0` (contract shape
+  unchanged — only a dataset entry was added).
+- Phases 0 (`v0.1.0`) and 1 (`v0.2.0`) complete.
+- Phase 2 designed the **first concrete dataset**, Universe Metadata
+  (`reference.universe.metadata`), to validate the Phase 1 governance framework
+  against a real dataset:
+  - Design doc — `docs/universe_metadata_dataset.md`
+  - Contract — `DATA_CONTRACT.md` → *Contract: Universe Metadata*
+  - Registry entry — `dataset_registry.json` `datasets[]` (`draft`, `v0.1.0`)
+  - Catalog entry — `DATA_CATALOG.md` (count 0 → 1)
+- **1 dataset registered**, in `draft` (`contract_validated = false`). No data
+  ingested and no executable code yet (by design — this is a design phase).
+- Awaiting Phase 2 review before any Phase 3 work begins.
 
 ---
 
 ## Current Priorities
 
-1. Pass Phase 1 review.
+1. Pass Phase 2 review.
 2. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
    in sync — registry wins on any conflict.
-3. Keep the governance docs internally consistent: lifecycle states, metadata
-   field names, and naming patterns must match across docs and the registry.
+3. Keep the Universe Metadata design consistent across its contract, registry
+   entry, catalog entry, and design doc.
 
 ---
 
 ## Blocking Issues
 
-- **None blocking Phase 1.**
-- Phase 2 is intentionally blocked pending review (governance, not a defect).
+- **None blocking Phase 2.**
+- Phase 3 is intentionally blocked pending review (governance, not a defect).
 
 ---
 
 ## Recommended Next Actions
 
-> Proposals only — execute **after** Phase 1 review approval.
+> Proposals only — execute **after** Phase 2 review approval.
 
-1. Define the first concrete dataset end-to-end: a `DATA_CONTRACT.md` contract
-   section + a real entry in `dataset_registry.json` + a catalog entry.
-2. Implement registry/contract **validation tooling** in `datahub/` + `scripts/`
-   (enforce `dataset_entry_schema`, lifecycle transitions, naming patterns).
+1. Implement registry/contract **validation tooling** in `datahub/` + `scripts/`
+   (enforce `dataset_entry_schema`, lifecycle transitions, naming patterns, and
+   the Universe Metadata quality rules Q1–Q6).
+2. Ingest Universe Metadata data, validate against its contract, and advance it
+   `draft → active`.
 3. Add a JSON Schema for `dataset_registry.json` and enforce it in CI.
 4. Auto-generate `DATA_CATALOG.md` from the registry to remove drift.
 5. Implement the snapshot mechanism per ROOT.md → *Snapshot Principles*.
@@ -74,7 +73,7 @@ Review Before Expansion. **Do not start Phase 2 without review approval.**
 | `HANDOFF.md` | Architecture, decisions, known issues, pending work. |
 | `README.md` | Project overview and structure. |
 | `QUICKSTART.md` | Fast path to getting started. |
-| `VERSION` | Current semantic version (`v0.2.0`). |
+| `VERSION` | Current semantic version (`v0.3.0`). |
 | `CHANGELOG.md` | Human-readable history of changes. |
 | `DATA_CONTRACT.md` | Dataset Contract Framework — schema + quality rules. |
 | `DATA_CATALOG.md` | Data Catalog Framework — derived human-readable view. |
@@ -84,6 +83,7 @@ Review Before Expansion. **Do not start Phase 2 without review approval.**
 | `docs/registry_standard.md` | Registry structure, versioning, discovery. |
 | `docs/authority_model.md` | Authority/sync/update governance relationships. |
 | `docs/naming_convention.md` | Naming rules for ids, fields, files, versions. |
+| `docs/universe_metadata_dataset.md` | First dataset design (Universe Metadata). |
 
 | Directory | Purpose |
 |-----------|---------|

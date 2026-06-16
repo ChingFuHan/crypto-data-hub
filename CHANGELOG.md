@@ -7,6 +7,40 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.3.0] — 2026-06-16
+
+### Added — Phase 2: First Dataset Design (Universe Metadata)
+
+- **Universe Metadata dataset design** (`reference.universe.metadata`) — the
+  first concrete dataset, designed to validate the Phase 1 governance framework
+  against a real dataset (`docs/universe_metadata_dataset.md`).
+- **Dataset contract** in `DATA_CONTRACT.md` (`Contract: Universe Metadata`):
+  14-field schema, primary key `[instrument_id]`, null policy, and six
+  dataset-specific quality rules (missing value, duplicate symbol, invalid
+  lifecycle, invalid timestamp, invalid contract info, referential).
+- **Registry entry** in `dataset_registry.json` `datasets[]` — registered as
+  `draft` `v0.1.0`, `contract_validated = false` (design only; no ingestion).
+- **Catalog entry** in `DATA_CATALOG.md` (count 0 → 1).
+- Supports active / delisted / renamed / merged symbols and point-in-time
+  universe reconstruction via `listed_at` / `delisted_at` intervals and
+  `successor_id`.
+
+### Changed
+
+- Bumped repo version `v0.2.0` → `v0.3.0`; updated `AGENTS.md` and `HANDOFF.md`
+  to reflect Phase 2. `registry_version` stays `v0.2.0` — the registry **contract
+  shape** is unchanged; only a dataset entry was added (per decision D13).
+
+### Notes
+
+- Design only: no data ingested, no executable code. The dataset stays `draft`
+  until a later phase ingests and validates data.
+- Phased delivery: Phase 2 stops here and awaits review before Phase 3.
+
+[v0.3.0]: #
+
+---
+
 ## [v0.2.0] — 2026-06-16
 
 ### Added — Phase 1: Data Governance Foundation

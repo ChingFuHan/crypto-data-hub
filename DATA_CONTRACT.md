@@ -222,11 +222,82 @@ new contract. Fill every placeholder; do not leave a section blank. The
 | Item | State |
 |------|-------|
 | Contract framework defined (this document) | Done (v0.2.0) |
-| Concrete dataset contracts | 0 defined |
+| Concrete dataset contracts | 1 defined — Universe Metadata (`reference.universe.metadata`) |
 | Automated validation tooling | Pending (later phase, after review) |
 | Machine-readable schema (JSON Schema) | Pending (later phase, after review) |
 
-**No concrete dataset contracts exist yet.** This document defines the framework
-and the reusable template; the first per-dataset contract is added when its
-dataset is registered in `dataset_registry.json` and validated under the
-*Validation Policy* above.
+The framework and reusable template are defined above. The first concrete
+contract — **Universe Metadata** — is defined below as a `draft`; it is **not yet
+contract-validated** (`quality.contract_validated = false`) because no data has
+been ingested. A contract moves its dataset `draft → active` only after passing
+the *Validation Policy*.
+
+---
+
+## Contract: Universe Metadata
+
+> Concrete dataset contract. The registry entry for `reference.universe.metadata`
+> references this section via `schema_ref`. Full design rationale and the
+> point-in-time reconstruction model are in
+> [docs/universe_metadata_dataset.md](docs/universe_metadata_dataset.md).
+
+**Dataset name:** Universe Metadata
+**Dataset ID:** `reference.universe.metadata`
+**Contract version:** `v0.1.0`  (moves with the dataset version)
+**Owner:** `data-platform`
+**Status:** `draft`  (dataset lifecycle; not yet validated)
+**Description:** Lifecycle and contract metadata for all tradable instruments,
+supporting point-in-time reconstruction of the tradable universe.
+**Source:** `api` — exchange instrument / `exchangeInfo` endpoints (aggregated)
+**Source timezone:** `UTC`  (storage: UTC, ISO 8601)
+**Primary key:** `[instrument_id]`  (unique, non-null)
+**Secondary uniqueness:** `(exchange, symbol, listed_at)` unique.
+
+> Per *Schema Definition Format*, data-field logical types include the
+> domain-appropriate `timestamp` and `decimal` types pinned by `unit` and
+> `constraints`. Timestamps are UTC ISO 8601 with offset.
+
+### Schema
+
+| name | type | nullable | unit | constraints | description |
+|------|------|----------|------|-------------|-------------|
+| `instrument_id` | string | false | n/a | matches `^[a-z0-9]+(?:[._-][a-z0-9]+)*$`; unique | Stable surrogate key for one tradable incarnation (symbol-era); primary key. A rename/merge produces a new incarnation with a new `instrument_id`, linked via the old row's `successor_id`. |
+| `symbol` | string | false | n/a | non-empty | Exchange ticker for this incarnation (e.g. `BTCUSDT`). |
+| `exchange` | string | false | n/a | lowercase venue code | Exchange / venue (e.g. `binance`). |
+| `base_asset` | string | true | n/a | null if not applicable | Base asset (e.g. `BTC`). |
+| `quote_asset` | string | true | n/a | null if not applicable | Quote asset (e.g. `USDT`). |
+| `market_type` | enum | false | n/a | `spot` \| `futures` \| `perpetual` \| `option` | Instrument class. |
+| `contract_type` | enum | true | n/a | futures/perpetual ⇒ `linear`\|`inverse`; option ⇒ `call`\|`put`; spot ⇒ null | Derivative contract type. |
+| `status` | enum | false | n/a | `active` \| `delisted` \| `renamed` \| `merged` | Symbol lifecycle state (distinct from the dataset lifecycle). |
+| `listed_at` | timestamp | false | UTC | ISO 8601 UTC | When the instrument became tradable. |
+| `delisted_at` | timestamp | true | UTC | ISO 8601 UTC; `NULL` iff `status = active`; when present `>= listed_at` | When trading ceased; `NULL` only while active. |
+| `successor_id` | string | true | n/a | resolves to an existing `instrument_id` (not self); `NOT NULL` iff `status ∈ {renamed, merged}` | Instrument this was renamed / merged into. |
+| `tick_size` | decimal | true | quote currency | `> 0` when present | Minimum price increment. |
+| `step_size` | decimal | true | base asset | `> 0` when present | Minimum quantity increment. |
+| `contract_size` | decimal | true | base asset per contract | `> 0` for derivatives; null for spot | Units of underlying per contract. |
+
+### Null Policy (dataset-specific)
+
+Required (non-null): `instrument_id`, `symbol`, `exchange`, `market_type`,
+`status`, `listed_at`. All other fields are nullable as marked. Nulls are never
+imputed or coerced — a missing required value fails loud (`ROOT.md` → *Fail loud*).
+
+### Quality Rules
+
+| # | Rule | Category | Assertion |
+|---|------|----------|-----------|
+| Q1 | Missing Value | Completeness | Required fields are present and non-null. |
+| Q2 | Duplicate Symbol | Uniqueness | `instrument_id` unique; `(exchange, symbol, listed_at)` unique; at most one `status = active` row per `(exchange, symbol)`. |
+| Q3 | Invalid Lifecycle | Consistency | `delisted_at IS NULL` **iff** `status = active`; `successor_id IS NOT NULL` **iff** `status ∈ {renamed, merged}`. (So `delisted`/`renamed`/`merged` all carry `delisted_at`; `active`/`delisted` carry null `successor_id`.) |
+| Q4 | Invalid Timestamp | Range / domain | `listed_at`/`delisted_at` valid UTC ISO 8601; when `delisted_at` present, `delisted_at >= listed_at`; neither future-dated beyond the ingestion instant. |
+| Q5 | Invalid Contract Information | Range / domain | `spot` ⇒ `contract_type IS NULL`; `market_type ∈ {futures, perpetual}` ⇒ `contract_type ∈ {linear, inverse}`; `market_type = option` ⇒ `contract_type ∈ {call, put}`; derivatives ⇒ `contract_size > 0`; `tick_size`/`step_size > 0` when present. |
+| Q6 | Referential | Referential | every non-null `successor_id` resolves to an existing `instrument_id`, is not self-referential (`!= instrument_id`), and the rename/merge successor graph is acyclic and terminates at an `active` or `delisted` row. |
+
+### Provenance & Snapshot
+
+- **Provenance** (design stage): `code_version = v0.3.0`, `params` records the
+  exchange set + `as_of`, `generated_by = design (no ingestion in Phase 2)`,
+  `checksum` empty until first artifact.
+- **Snapshot policy:** on first publication, snapshot identity =
+  `reference.universe.metadata` + version + UTC timestamp; immutable, checksummed,
+  bound to this contract version (`ROOT.md` → *Snapshot Principles*).

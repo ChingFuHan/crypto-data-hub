@@ -72,29 +72,39 @@ view; lifecycle `status` is single-sourced in the registry; validation gates the
 | D14 | `dataset_id` is stable once active — deprecate + new id instead of rename. | Stable identifiers protect lineage, snapshots, and reproducibility. |
 | D15 | All timestamps stored UTC ISO 8601; source tz recorded in `timezone`. | Eliminates ambiguity in time-series crypto data (Reproducibility, Data Quality). |
 
+### Phase 2 — First Dataset Design (v0.3.0)
+
+| # | Decision | Why |
+|---|----------|-----|
+| D16 | First dataset = **Universe Metadata** (`reference.universe.metadata`). | A reference dataset exercises every framework piece and is upstream of many future datasets — the strongest framework validation. |
+| D17 | Primary key is a surrogate `instrument_id`, not `symbol`. | Tickers are reused/renamed/merged over time; a stable surrogate survives renames and enables point-in-time reconstruction (Reproducibility). |
+| D18 | Symbol-level `status` column (`active`/`delisted`/`renamed`/`merged`) is **separate** from the dataset lifecycle `status`. | Two different lifecycles; conflating them would corrupt both the data model and governance. |
+| D19 | Registered as `draft` with `contract_validated = false`; **no ingestion** in Phase 2. | Honest integrity — Phase 2 is design; claiming validation without data would violate "fail loud"/provenance. |
+| D20 | Repo bumped to `v0.3.0` but `registry_version` stays `v0.2.0`. | Live proof of D13: adding a dataset entry does not change the registry contract shape. |
+
 ---
 
 ## Known Issues
 
-- **0 datasets registered**: `dataset_registry.json` `datasets[]` is empty and
-  `DATA_CONTRACT.md` holds the framework/template but no concrete contracts yet
-  (expected — datasets arrive in a later phase).
-- No executable code, tests, or CI exist yet (deferred to later phases).
+- **1 dataset registered, in `draft`**: Universe Metadata is fully *designed* but
+  has **no ingested data** and `contract_validated = false`. It cannot be trusted
+  or moved to `active` until a later phase ingests and validates data.
+- No executable code, tests, or CI exist yet (deferred to later phases) — so the
+  Universe Metadata quality rules (Q1–Q6) are specified but not yet enforced.
 - No JSON Schema file enforces `dataset_entry_schema` yet; the registry is
   self-describing but not machine-validated in CI.
 - `DATA_CATALOG.md` is maintained by hand until catalog generation lands.
 
-None of the above blocks Phase 1; they are the expected post-foundation state.
+None of the above blocks Phase 2; they are the expected design-stage state.
 
 ---
 
 ## Pending Work
 
-- **Phase 2+ (post-review):**
-  - Define the first real dataset end-to-end (contract section → registry entry
-    → catalog entry) following the Phase 1 governance model.
+- **Phase 3+ (post-review):**
   - Build registry/contract **validation tooling** in `datahub/` + `scripts/`
-    (schema, lifecycle transitions, naming patterns).
+    (schema, lifecycle transitions, naming patterns, quality rules Q1–Q6).
+  - Ingest Universe Metadata data, validate, and advance `draft → active`.
   - Add a JSON Schema for `dataset_registry.json` and enforce in CI.
   - Auto-generate `DATA_CATALOG.md` from the registry.
   - Implement the snapshot mechanism (immutable, content-addressable).

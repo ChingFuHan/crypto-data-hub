@@ -58,9 +58,23 @@ Copy this block when adding a dataset. Populate every field from the dataset's `
 
 ## Datasets
 
-_No datasets registered. **0 datasets** in `dataset_registry.json`._
+**1 dataset** registered in `dataset_registry.json`.
 
-Entries are added here only after a dataset is registered in `dataset_registry.json` and validated against `DATA_CONTRACT.md`. Each added entry must use the template above and stay in sync with its registry record.
+Each entry mirrors its registry record (including lifecycle `status`, which may be
+`draft`). Entries use the template above and stay in sync with the registry.
+
+### reference.universe.metadata
+
+- **Name:** Universe Metadata
+- **Description:** Lifecycle and contract metadata for all tradable instruments, supporting point-in-time reconstruction of the tradable universe.
+- **Owner:** data-platform
+- **Source:** api — exchange instrument / exchangeInfo endpoints (aggregated)
+- **Schema:** see `DATA_CONTRACT.md#contract-universe-metadata`
+- **Update Frequency:** daily
+- **Known Issues:** Draft design; no data ingested in Phase 2 (`contract_validated = false`). `earliest_timestamp` / `latest_timestamp` are null until first publication.
+- **Status:** draft
+
+Full design: [`docs/universe_metadata_dataset.md`](docs/universe_metadata_dataset.md).
 
 ---
 
@@ -69,4 +83,4 @@ Entries are added here only after a dataset is registered in `dataset_registry.j
 - Every catalog entry corresponds to exactly one entry in `dataset_registry.json`.
 - The registry is the source of truth; the catalog never lists a dataset that is not registered.
 - The `Status` shown here MUST equal the registry `status`, which MUST equal the dataset's true lifecycle state.
-- Registered dataset count: **0**.
+- Registered dataset count: **1**.
