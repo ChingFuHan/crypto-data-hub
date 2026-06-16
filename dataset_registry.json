@@ -1,37 +1,158 @@
 {
-  "registry_version": "v0.2.0",
-  "description": "Authoritative, machine-readable index of all datasets in crypto-data-hub. A dataset is not real until it is registered here. dataset_registry.json is the single source of truth; DATA_CATALOG.md is a human-readable view derived from it. Field rules are defined in DATA_CONTRACT.md and docs/registry_standard.md.",
-  "updated_at": "2026-06-16",
-  "conventions": {
-    "dataset_id_pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
-    "dataset_id_recommended_form": "<domain>.<entity>.<granularity>  e.g. market.btc_usd.ohlcv_1h",
-    "version_pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
-    "timestamp_format": "ISO 8601 with timezone offset; stored in UTC",
-    "default_timezone": "UTC",
-    "lifecycle_states": ["draft", "active", "deprecated", "archived"],
-    "status_enum": ["draft", "active", "deprecated", "archived"]
-  },
-  "dataset_entry_schema": {
-    "dataset_id":         { "type": "string",          "required": true,  "unique": true, "description": "Stable unique identifier. Matches conventions.dataset_id_pattern." },
-    "dataset_name":       { "type": "string",          "required": true,  "description": "Human-readable name (Title Case)." },
-    "description":        { "type": "string",          "required": true,  "description": "One-line summary of dataset contents." },
-    "version":            { "type": "string",          "required": true,  "description": "Dataset semantic version. Matches conventions.version_pattern." },
-    "status":             { "type": "enum",            "required": true,  "enum": ["draft", "active", "deprecated", "archived"], "description": "Lifecycle state. See docs/dataset_lifecycle.md." },
-    "owner":              { "type": "string",          "required": true,  "description": "Responsible team or agent." },
-    "source":             { "type": "object",          "required": true,  "fields": { "type": "string (api|file|onchain|derived)", "reference": "string (endpoint, path, or upstream dataset_id)" }, "description": "Where the data originates." },
-    "timezone":           { "type": "string",          "required": true,  "description": "IANA timezone of source semantics, e.g. UTC. Storage is always UTC." },
-    "update_frequency":   { "type": "string",          "required": true,  "description": "Cadence, e.g. realtime | 1h | daily | weekly | manual." },
-    "earliest_timestamp": { "type": "string | null",   "required": false, "description": "ISO 8601. Required for time-series datasets; null otherwise." },
-    "latest_timestamp":   { "type": "string | null",   "required": false, "description": "ISO 8601. Required for time-series datasets; null otherwise." },
-    "schema_ref":         { "type": "string",          "required": true,  "description": "Pointer to this dataset's schema section in DATA_CONTRACT.md." },
-    "primary_key":        { "type": "array<string>",   "required": true,  "description": "Field(s) forming the unique, non-null primary key." },
-    "lineage":            { "type": "object",          "required": false, "fields": { "upstream": "array<string> (upstream dataset_ids)", "transformation": "string (description or code reference)" }, "description": "Upstream relationships and how this dataset is derived." },
-    "provenance":         { "type": "object",          "required": true,  "fields": { "code_version": "string (repo version that generated the data)", "params": "object (parameters needed to reproduce)", "generated_by": "string (process or agent)", "checksum": "string (content hash)" }, "description": "Information sufficient to reproduce the dataset." },
-    "snapshot":           { "type": "object | null",   "required": false, "fields": { "snapshot_id": "string (dataset_id + version + timestamp)", "created_at": "string (ISO 8601)", "checksum": "string (content hash)", "immutable": "boolean (true once published)" }, "description": "Set when a snapshot is published. Immutable thereafter." },
-    "quality":            { "type": "object",          "required": true,  "fields": { "contract_validated": "boolean (passed DATA_CONTRACT.md checks)", "last_validated_at": "string (ISO 8601)" }, "description": "Data-quality validation state." },
-    "tags":               { "type": "array<string>",   "required": false, "description": "Optional discovery tags." },
-    "created_at":         { "type": "string",          "required": true,  "description": "ISO 8601 timestamp of registry entry creation." },
-    "updated_at":         { "type": "string",          "required": true,  "description": "ISO 8601 timestamp of last registry entry update." }
-  },
-  "datasets": []
+    "registry_version": "v0.2.0",
+    "description": "Authoritative, machine-readable index of all datasets in crypto-data-hub. A dataset is not real until it is registered here. dataset_registry.json is the single source of truth; DATA_CATALOG.md is a human-readable view derived from it. Field rules are defined in DATA_CONTRACT.md and docs/registry_standard.md.",
+    "updated_at": "2026-06-16",
+    "conventions": {
+        "dataset_id_pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+        "dataset_id_recommended_form": "<domain>.<entity>.<granularity>  e.g. market.btc_usd.ohlcv_1h",
+        "version_pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+        "timestamp_format": "ISO 8601 with timezone offset; stored in UTC",
+        "default_timezone": "UTC",
+        "lifecycle_states": [
+            "draft",
+            "active",
+            "deprecated",
+            "archived"
+        ],
+        "status_enum": [
+            "draft",
+            "active",
+            "deprecated",
+            "archived"
+        ]
+    },
+    "dataset_entry_schema": {
+        "dataset_id": {
+            "type": "string",
+            "required": true,
+            "unique": true,
+            "description": "Stable unique identifier. Matches conventions.dataset_id_pattern."
+        },
+        "dataset_name": {
+            "type": "string",
+            "required": true,
+            "description": "Human-readable name (Title Case)."
+        },
+        "description": {
+            "type": "string",
+            "required": true,
+            "description": "One-line summary of dataset contents."
+        },
+        "version": {
+            "type": "string",
+            "required": true,
+            "description": "Dataset semantic version. Matches conventions.version_pattern."
+        },
+        "status": {
+            "type": "enum",
+            "required": true,
+            "enum": [
+                "draft",
+                "active",
+                "deprecated",
+                "archived"
+            ],
+            "description": "Lifecycle state. See docs/dataset_lifecycle.md."
+        },
+        "owner": {
+            "type": "string",
+            "required": true,
+            "description": "Responsible team or agent."
+        },
+        "source": {
+            "type": "object",
+            "required": true,
+            "fields": {
+                "type": "string (api|file|onchain|derived)",
+                "reference": "string (endpoint, path, or upstream dataset_id)"
+            },
+            "description": "Where the data originates."
+        },
+        "timezone": {
+            "type": "string",
+            "required": true,
+            "description": "IANA timezone of source semantics, e.g. UTC. Storage is always UTC."
+        },
+        "update_frequency": {
+            "type": "string",
+            "required": true,
+            "description": "Cadence, e.g. realtime | 1h | daily | weekly | manual."
+        },
+        "earliest_timestamp": {
+            "type": "string | null",
+            "required": false,
+            "description": "ISO 8601. Required for time-series datasets; null otherwise."
+        },
+        "latest_timestamp": {
+            "type": "string | null",
+            "required": false,
+            "description": "ISO 8601. Required for time-series datasets; null otherwise."
+        },
+        "schema_ref": {
+            "type": "string",
+            "required": true,
+            "description": "Pointer to this dataset's schema section in DATA_CONTRACT.md."
+        },
+        "primary_key": {
+            "type": "array<string>",
+            "required": true,
+            "description": "Field(s) forming the unique, non-null primary key."
+        },
+        "lineage": {
+            "type": "object",
+            "required": false,
+            "fields": {
+                "upstream": "array<string> (upstream dataset_ids)",
+                "transformation": "string (description or code reference)"
+            },
+            "description": "Upstream relationships and how this dataset is derived."
+        },
+        "provenance": {
+            "type": "object",
+            "required": true,
+            "fields": {
+                "code_version": "string (repo version that generated the data)",
+                "params": "object (parameters needed to reproduce)",
+                "generated_by": "string (process or agent)",
+                "checksum": "string (content hash)"
+            },
+            "description": "Information sufficient to reproduce the dataset."
+        },
+        "snapshot": {
+            "type": "object | null",
+            "required": false,
+            "fields": {
+                "snapshot_id": "string (dataset_id + version + timestamp)",
+                "created_at": "string (ISO 8601)",
+                "checksum": "string (content hash)",
+                "immutable": "boolean (true once published)"
+            },
+            "description": "Set when a snapshot is published. Immutable thereafter."
+        },
+        "quality": {
+            "type": "object",
+            "required": true,
+            "fields": {
+                "contract_validated": "boolean (passed DATA_CONTRACT.md checks)",
+                "last_validated_at": "string (ISO 8601)"
+            },
+            "description": "Data-quality validation state."
+        },
+        "tags": {
+            "type": "array<string>",
+            "required": false,
+            "description": "Optional discovery tags."
+        },
+        "created_at": {
+            "type": "string",
+            "required": true,
+            "description": "ISO 8601 timestamp of registry entry creation."
+        },
+        "updated_at": {
+            "type": "string",
+            "required": true,
+            "description": "ISO 8601 timestamp of last registry entry update."
+        }
+    },
+    "datasets": []
 }
