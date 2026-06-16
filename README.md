@@ -4,8 +4,8 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 0 (Repository Foundation) — skeleton complete, awaiting review.
-> **Version:** `v0.1.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 1 (Data Governance Foundation) — complete, awaiting review.
+> **Version:** `v0.2.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,20 +30,26 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.1.0)
+├── VERSION                 # Semantic version (v0.2.0)
 ├── CHANGELOG.md            # Human-readable change history
 │
-├── DATA_CATALOG.md         # Dataset index (skeleton)
-├── DATA_CONTRACT.md        # Schema + quality rules (skeleton)
-├── dataset_registry.json   # Authoritative dataset registry (skeleton)
+├── DATA_CATALOG.md         # Data Catalog Framework — derived view
+├── DATA_CONTRACT.md        # Dataset Contract Framework — schema + quality rules
+├── dataset_registry.json   # Authoritative, machine-readable registry
+│
+├── docs/                   # Governance standards
+│   ├── dataset_lifecycle.md    # Lifecycle states + transitions
+│   ├── metadata_standard.md    # Metadata fields, types, rules
+│   ├── registry_standard.md    # Registry structure, versioning, discovery
+│   ├── authority_model.md      # Authority + sync + update model
+│   └── naming_convention.md    # Naming rules
 │
 ├── datahub/                # Core platform package (future)
 ├── scripts/                # Automation scripts (future)
 ├── tests/                  # Test suite (future)
 ├── reports/                # Generated reports (future)
 ├── examples/               # Usage examples (future)
-├── logs/                   # Runtime logs
-└── docs/                   # Extended documentation
+└── logs/                   # Runtime logs
 ```
 
 ---
@@ -57,8 +63,14 @@ New here? Read in this order:
 3. [`HANDOFF.md`](HANDOFF.md) — architecture and decisions
 4. [`README.md`](README.md) — this overview
 
-Then see [`QUICKSTART.md`](QUICKSTART.md). Before touching data, read
-[`DATA_CONTRACT.md`](DATA_CONTRACT.md) and [`dataset_registry.json`](dataset_registry.json).
+Then see [`QUICKSTART.md`](QUICKSTART.md). Before touching data, read the
+governance set: [`DATA_CONTRACT.md`](DATA_CONTRACT.md),
+[`docs/metadata_standard.md`](docs/metadata_standard.md),
+[`docs/registry_standard.md`](docs/registry_standard.md),
+[`docs/dataset_lifecycle.md`](docs/dataset_lifecycle.md),
+[`docs/authority_model.md`](docs/authority_model.md),
+[`docs/naming_convention.md`](docs/naming_convention.md), and
+[`dataset_registry.json`](dataset_registry.json).
 
 ---
 

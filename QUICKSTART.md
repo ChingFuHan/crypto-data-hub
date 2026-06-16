@@ -2,8 +2,9 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 0 (Repository Foundation). No executable pipeline
-> exists yet — this guide covers onboarding and what is available today.
+> **Current phase:** Phase 1 (Data Governance Foundation) — governance standards
+> defined; no executable pipeline yet. This guide covers onboarding and the
+> governance docs available today.
 
 ---
 
@@ -35,7 +36,7 @@ The data-plane directories are skeletons in Phase 0 and fill in later phases.
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.1.0`).
+- Version: see `VERSION` (currently `v0.2.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -59,4 +60,6 @@ The registry is plain JSON and validates with any standard tool, e.g.:
 python -m json.tool dataset_registry.json
 ```
 
-In Phase 0 it contains no datasets — only the schema skeleton.
+It currently contains no datasets — only `conventions` and the
+`dataset_entry_schema` (the machine-readable registry contract). See
+`docs/registry_standard.md` for how entries are structured and discovered.
