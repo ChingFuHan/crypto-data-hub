@@ -4,8 +4,8 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 4 (Universe Metadata Ingestion MVP) — complete, awaiting review.
-> **Version:** `v0.5.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 5 (Binance USD-M Kline Historical Pipeline) — complete, awaiting review.
+> **Version:** `v0.6.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,7 +30,7 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.5.0)
+├── VERSION                 # Semantic version (v0.6.0)
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -47,15 +47,19 @@ crypto-data-hub/
 │   └── validation_framework.md       # Validation framework (Phase 3)
 │
 ├── datahub/                # Core platform package
-│   ├── ingestion/          # Universe Metadata ingestion MVP
+│   ├── ingestion/          # Universe Metadata + Binance Kline ingestion
 │   └── validation/         # Executable validation framework
 ├── data/                   # Small committed reference artifacts
+├── local_data/             # Large market data (Kline archives) — git-ignored
 ├── scripts/                # Automation scripts
 ├── tests/                  # Test suite and fixtures
 ├── reports/                # Generated reports (future)
 ├── examples/               # Usage examples (future)
 └── logs/                   # Runtime logs
 ```
+
+Large market data (Binance Kline archives) lives under `local_data/` and is
+**never committed** — see [`docs/market_data_storage_policy.md`](docs/market_data_storage_policy.md).
 
 ---
 

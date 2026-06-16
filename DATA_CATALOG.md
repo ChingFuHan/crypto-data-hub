@@ -58,7 +58,7 @@ Copy this block when adding a dataset. Populate every field from the dataset's `
 
 ## Datasets
 
-**1 dataset** registered in `dataset_registry.json`.
+**2 datasets** registered in `dataset_registry.json`.
 
 Each entry mirrors its registry record (including lifecycle `status`, which may be
 `draft`). Entries use the template above and stay in sync with the registry.
@@ -79,6 +79,23 @@ Each entry mirrors its registry record (including lifecycle `status`, which may 
 
 Full design: [`docs/universe_metadata_dataset.md`](docs/universe_metadata_dataset.md).
 
+### market.binance.um.klines
+
+- **Name:** Binance USD-M Futures Klines
+- **Description:** Historical OHLCV Kline bars for Binance USD-M Futures from the Binance Data Vision public archive, parameterized by Kline interval.
+- **Owner:** data-platform
+- **Source:** file — https://data.binance.vision/data/futures/um/{monthly,daily}/klines/<SYMBOL>/<INTERVAL>/ (Binance Data Vision public archive)
+- **Schema:** see `DATA_CONTRACT.md#contract-binance-usd-m-futures-klines`
+- **Update Frequency:** daily
+- **Primary key:** `[symbol, interval, open_time]`
+- **Supported intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `1m` (first production interval `1d`)
+- **Local data:** `local_data/binance_um_klines/interval=<INTERVAL>/` — **not committed** (large market data; machine-specific). See `docs/market_data_storage_policy.md`.
+- **Validation:** `python -m datahub.validation --target binance-um-klines --interval 1d --manifest local_data/binance_um_klines/interval=1d/manifests/manifest.json`
+- **Known Issues:** Lifecycle remains `draft` and `contract_validated = false`. Phase 5 verifies raw archive inventory + checksums only; row-level normalization / Parquet materialization is deferred to Phase 6. Full historical data is uncommitted.
+- **Status:** draft
+
+Full design: [`docs/binance_um_klines_dataset.md`](docs/binance_um_klines_dataset.md).
+
 ---
 
 ## Catalog–Registry Contract
@@ -86,4 +103,4 @@ Full design: [`docs/universe_metadata_dataset.md`](docs/universe_metadata_datase
 - Every catalog entry corresponds to exactly one entry in `dataset_registry.json`.
 - The registry is the source of truth; the catalog never lists a dataset that is not registered.
 - The `Status` shown here MUST equal the registry `status`, which MUST equal the dataset's true lifecycle state.
-- Registered dataset count: **1**.
+- Registered dataset count: **2**.

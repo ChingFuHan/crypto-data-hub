@@ -222,7 +222,7 @@ new contract. Fill every placeholder; do not leave a section blank. The
 | Item | State |
 |------|-------|
 | Contract framework defined (this document) | Done (v0.2.0) |
-| Concrete dataset contracts | 1 defined — Universe Metadata (`reference.universe.metadata`) |
+| Concrete dataset contracts | 2 defined — Universe Metadata (`reference.universe.metadata`), Binance USD-M Klines (`market.binance.um.klines`) |
 | Automated validation tooling | Initial foundation done (v0.4.0; registry/lifecycle/naming + Universe Metadata fixtures) |
 | Machine-readable schema (JSON Schema) | Pending (later phase, after review) |
 
@@ -315,3 +315,81 @@ imputed or coerced — a missing required value fails loud (`ROOT.md` → *Fail 
 - **Snapshot policy:** on first publication, snapshot identity =
   `reference.universe.metadata` + version + UTC timestamp; immutable, checksummed,
   bound to this contract version (`ROOT.md` → *Snapshot Principles*).
+
+---
+
+## Contract: Binance USD-M Futures Klines
+
+> Concrete dataset contract for the parameterized Binance USD-M Futures Kline
+> family. The registry entry for `market.binance.um.klines` references this
+> section via `schema_ref`. Full design is in
+> [docs/binance_um_klines_dataset.md](docs/binance_um_klines_dataset.md).
+
+**Dataset name:** Binance USD-M Futures Klines
+**Dataset ID:** `market.binance.um.klines`  (interval variants: `market.binance.um.klines.<INTERVAL>`)
+**Contract version:** `v0.1.0`  (moves with the dataset version)
+**Owner:** `data-platform`
+**Status:** `draft`  (dataset lifecycle; Phase 5 verifies raw archives only)
+**Description:** Historical OHLCV Kline bars for Binance USD-M Futures, ingested
+from the Binance Data Vision public archive, parameterized by Kline interval.
+**Source:** `file` — Binance Data Vision public archive
+(`https://data.binance.vision/data/futures/um/{monthly,daily}/klines/<SYMBOL>/<INTERVAL>/`)
+**Source timezone:** `UTC`  (storage: UTC, ISO 8601 / epoch milliseconds)
+**Primary key:** `[symbol, interval, open_time]`  (unique, non-null)
+**Supported intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `1m`  (first production interval `1d`)
+
+> **Kline interval vs archive package source.** The Kline `interval` is the row
+> period. The archive *package source* (`monthly` historical base / `daily`
+> recent delta) is only how Binance packages files; it is **not** a Kline
+> interval and is **not** part of the schema or primary key.
+
+### Schema (normalized row — Phase 6 materialization target)
+
+| name | type | nullable | unit | constraints | description |
+|------|------|----------|------|-------------|-------------|
+| `symbol` | string | false | n/a | non-empty; Binance symbol | Trading symbol (e.g. `BTCUSDT`). From archive path, not a CSV column. |
+| `interval` | enum | false | n/a | `1d`\|`4h`\|`1h`\|`15m`\|`5m`\|`1m` | Kline interval. From archive path, not a CSV column. |
+| `open_time` | timestamp | false | ms epoch (UTC) | `>= 0`; aligned to interval | Bar open time. Part of primary key. |
+| `open` | decimal | false | quote | `> 0` | Open price. |
+| `high` | decimal | false | quote | `>= open, close, low` | High price. |
+| `low` | decimal | false | quote | `<= open, close, high` | Low price. |
+| `close` | decimal | false | quote | `> 0` | Close price. |
+| `volume` | decimal | false | base | `>= 0` | Base-asset volume. |
+| `close_time` | timestamp | false | ms epoch (UTC) | `> open_time` | Bar close time. |
+| `quote_asset_volume` | decimal | false | quote | `>= 0` | Quote-asset volume. |
+| `count` | integer | false | n/a | `>= 0` | Number of trades. |
+| `taker_buy_volume` | decimal | false | base | `>= 0, <= volume` | Taker buy base volume. |
+| `taker_buy_quote_volume` | decimal | false | quote | `>= 0, <= quote_asset_volume` | Taker buy quote volume. |
+
+> The raw archive CSV also carries a trailing `ignore` column (always `0`); it is
+> a deprecated Binance field and is dropped from the normalized schema. Older
+> archives have no header row; newer files may include one.
+
+### Quality Rules
+
+| # | Rule | Category | Assertion |
+|---|------|----------|-----------|
+| K1 | Completeness | Completeness | All non-null fields present; no row dropped silently. |
+| K2 | Uniqueness | Uniqueness | `(symbol, interval, open_time)` unique across all rows. |
+| K3 | Range / domain | Range / domain | Prices `> 0`; volumes `>= 0`; `interval` in the supported set. |
+| K4 | Consistency | Consistency | `high >= max(open, close)`; `low <= min(open, close)`; `close_time > open_time`; taker volumes `<=` totals. |
+| K5 | Archive integrity | Completeness | Every downloaded archive zip matches its published `.CHECKSUM` (SHA-256). Mismatch fails loud. |
+| K6 | Referential | Referential | `symbol` is cross-checkable against `reference.universe.metadata` but is **not** constrained to the current active universe (the archive includes delisted symbols). |
+
+> **Phase 5 scope.** Phase 5 builds and verifies the raw archive inventory
+> (zip + `.CHECKSUM`) under `local_data/` and records a manifest, coverage, and
+> research-access metadata. Row-level checks K1–K4 become executable when the
+> normalized Parquet materialization lands in Phase 6. K5 (checksum) is enforced
+> now during download/verify.
+
+### Provenance & Snapshot
+
+- **Provenance** (Phase 5): `code_version = v0.6.0`, `generated_by =
+  datahub.ingestion.binance_um_klines`; `params` records the interval, archive
+  sources, daily-delta policy, and `local_root`. There is **no single committed
+  content checksum**: full historical market data lives only under `local_data/`
+  (uncommitted, machine-specific); per-file SHA-256 checksums are recorded in the
+  run manifest at `local_data/binance_um_klines/interval=<INTERVAL>/manifests/`.
+- **Snapshot policy:** snapshots are deferred until a future phase publishes an
+  immutable, content-addressable materialization (`ROOT.md` → *Snapshot
+  Principles*); Phase 5 raw archives are not a published snapshot.

@@ -24,5 +24,10 @@ Thumbs.db
 # Data artifacts (snapshots/large data live outside VCS unless explicitly tracked)
 *.tmp
 
+# Large market data — Binance Kline archives and any machine-specific local data.
+# Never commit full historical market data; it lives only on the machine that
+# ran the ingestion pipeline.
+local_data/
+
 # Claude Code internal state
 .claude/

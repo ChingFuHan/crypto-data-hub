@@ -7,68 +7,76 @@
 
 ## Current Phase
 
-**Phase 4 — Universe Metadata Ingestion MVP** (complete, awaiting review).
+**Phase 5 — Binance USD-M Kline Historical Pipeline** (complete, awaiting review).
 
 Delivery model: Architecture First → MVP First → Incremental Delivery →
-Review Before Expansion. **Do not start Phase 5 without review approval.**
+Review Before Expansion. **Do not start Phase 6 without review approval.**
 
 ---
 
 ## Current Status
 
-- Repo version: `v0.5.0`. `registry_version` stays `v0.2.0` because the
-  registry contract shape did not change.
-- Phases 0 (`v0.1.0`), 1 (`v0.2.0`), 2 (`v0.3.0`), and 3 (`v0.4.0`) are
-  complete.
-- Phase 4 added the first Universe Metadata ingestion MVP:
-  - Source review — `docs/universe_metadata_sources.md`
-  - Ingestion CLI — `python -m datahub.ingestion.universe_metadata`
-  - Raw snapshot — `data/raw/reference/universe_metadata/`
-  - Normalized artifact — `data/reference/universe_metadata/reference.universe.metadata.json`
-  - Manifest — `data/manifests/reference/universe_metadata/manifest.json`
-  - Ingestion tests/fixtures — `tests/test_universe_metadata_ingestion.py`,
-    `tests/fixtures/ingestion/universe_metadata/`
-- Universe Metadata (`reference.universe.metadata`) remains lifecycle `draft`.
-  The Phase 4 artifact validates successfully, but
-  `quality.contract_validated = false` remains unchanged to avoid implying
-  `draft → active` promotion.
-- Coverage is `active_current` only: Binance USD-M Futures current `TRADING`
-  symbols from `exchangeInfo`.
+- Repo version: `v0.6.0`. `registry_version` stays `v0.2.0` because the
+  registry contract shape did not change (a dataset entry was added, not a new
+  field).
+- Phases 0 (`v0.1.0`) through 4 (`v0.5.0`) are complete.
+- Phase 5 added a parameterized Binance USD-M Futures Kline ingestion pipeline:
+  - Ingestion CLI — `python -m datahub.ingestion.binance_um_klines --interval 1d --all`
+  - Interval-parameterized (`1d`/`4h`/`1h`/`15m`/`5m`/`1m`); first interval `1d`,
+    nothing hard-codes `1d`.
+  - Source — Binance Data Vision public archive (monthly historical base + daily
+    recent delta); archive discovery, zip + `.CHECKSUM` download, SHA-256 verify,
+    resume / skip-verified.
+  - Large market data lives under `local_data/binance_um_klines/interval=<INTERVAL>/`
+    and is **git-ignored / uncommitted**.
+  - Manifests, coverage reports, and a research-access manifest are written under
+    `local_data/`.
+  - Validation target `binance-um-klines` (explicit `--manifest`); clone-safe
+    `--all` skips it when no `local_data` manifest exists.
+  - Tests/fixtures — `tests/test_binance_um_klines.py`,
+    `tests/fixtures/ingestion/binance_um_klines/`.
+- Both datasets remain lifecycle `draft`:
+  - `reference.universe.metadata` — `active_current` coverage (Phase 4).
+  - `market.binance.um.klines` — Phase 5 verifies raw archive inventory +
+    checksums only; row-level normalization / Parquet is deferred to Phase 6.
+    `contract_validated = false`.
 - Module execution entry points:
+  - `python -m datahub.ingestion.binance_um_klines --interval 1d --all`
   - `python -m datahub.ingestion.universe_metadata --offline --all`
   - `python -m datahub.validation --all`
   - `python -m unittest discover tests`
-- Awaiting Phase 4 review before any Phase 5 work begins.
+- Awaiting Phase 5 review before any Phase 6 work begins.
 
 ---
 
 ## Current Priorities
 
-1. Pass Phase 4 review.
-2. Keep offline ingestion idempotent and validation commands green.
-3. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
+1. Pass Phase 5 review.
+2. Keep `python -m datahub.validation --all` and `unittest discover tests`
+   green and **clone-safe** (no `local_data/` required).
+3. Never commit `local_data/`; confirm `git status --short` before every commit.
+4. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
    in sync — registry wins on any conflict.
-4. Keep artifact/manifest/checksum references aligned across registry, catalog,
-   handoff, and docs.
 
 ---
 
 ## Blocking Issues
 
-- **None blocking Phase 4 review.**
-- Phase 5 is intentionally blocked pending review (governance, not a defect).
+- **None blocking Phase 5 review.**
+- Phase 6 is intentionally blocked pending review (governance, not a defect).
 
 ---
 
 ## Recommended Next Actions
 
-> Proposals only — execute **after** Phase 4 review approval.
+> Proposals only — execute **after** Phase 5 review approval.
 
-1. Decide whether `contract_validated` should distinguish artifact validation
-   from lifecycle promotion.
-2. Expand Universe Metadata to historical delist / rename / merge evidence.
-3. Add JSON Schema for `dataset_registry.json` and enforce validation in CI.
-4. Auto-generate `DATA_CATALOG.md` from the registry.
+1. Phase 6: normalize verified Kline archives into a primary-keyed, partitioned
+   Parquet materialization; make row-level rules K1–K4 executable.
+2. Run remaining intervals (`4h`/`1h`/`15m`/`5m`/`1m`) through the same pipeline.
+3. Decide whether `contract_validated` should distinguish artifact validation
+   from lifecycle promotion (applies to both datasets).
+4. Add JSON Schema for `dataset_registry.json` and enforce validation in CI.
 5. Implement immutable, content-addressable snapshot publication.
 
 ---
@@ -82,7 +90,7 @@ Review Before Expansion. **Do not start Phase 5 without review approval.**
 | `HANDOFF.md` | Architecture, decisions, known issues, pending work. |
 | `README.md` | Project overview and structure. |
 | `QUICKSTART.md` | Fast path to getting started. |
-| `VERSION` | Current semantic version (`v0.5.0`). |
+| `VERSION` | Current semantic version (`v0.6.0`). |
 | `CHANGELOG.md` | Human-readable history of changes. |
 | `DATA_CONTRACT.md` | Dataset Contract Framework — schema + quality rules. |
 | `DATA_CATALOG.md` | Data Catalog Framework — derived human-readable view. |
@@ -90,13 +98,17 @@ Review Before Expansion. **Do not start Phase 5 without review approval.**
 | `docs/universe_metadata_sources.md` | Source authority review. |
 | `docs/validation_framework.md` | Validation architecture and CLI docs. |
 | `docs/universe_metadata_dataset.md` | Universe Metadata design + Phase 4 artifact notes. |
+| `docs/binance_um_klines_dataset.md` | Binance Kline pipeline design + CLI (Phase 5). |
+| `docs/research_agent_klines_access.md` | How a research agent reads Kline archives. |
+| `docs/market_data_storage_policy.md` | `local_data/` storage + no-large-data-commit policy. |
 | `data/manifests/reference/universe_metadata/manifest.json` | Phase 4 artifact manifest. |
 
 | Directory | Purpose |
 |-----------|---------|
-| `datahub/ingestion/` | Universe Metadata ingestion workflow. |
+| `datahub/ingestion/` | Universe Metadata + Binance Kline ingestion. |
 | `datahub/validation/` | Executable validation framework. |
 | `data/` | Small committed reference artifacts for offline validation. |
+| `local_data/` | Large market data (Kline archives) — **git-ignored, never committed**. |
 | `scripts/` | Automation and operational scripts. |
 | `tests/` | Test suite and fixtures. |
 | `reports/` | Generated reports and quality outputs. |

@@ -17,9 +17,12 @@ Universe Metadata artifact validation. Current scope:
 - Dataset lifecycle rules from `docs/dataset_lifecycle.md`
 - Dataset-related naming rules from `docs/naming_convention.md`
 - Universe Metadata artifact/fixture validation for Q1-Q6 plus point-in-time reconstruction
+- Phase 5: Binance USD-M Klines `local_data` run-manifest validation (`binance-um-klines`)
 
 Phase 4 adds a validated draft Universe Metadata artifact. Validation still does
-not move Universe Metadata from `draft` to `active`.
+not move Universe Metadata from `draft` to `active`. Phase 5 adds a manifest
+validator for large `local_data` Kline runs that is **explicit-only** and never
+required by the clone-safe `--all` default.
 
 ---
 
@@ -162,6 +165,22 @@ python -m datahub.validation --target universe-metadata --fixture tests/fixtures
 
 Validates one artifact or fixture file.
 
+Binance USD-M Klines target (Phase 5):
+
+```bash
+python -m datahub.validation --target binance-um-klines --interval 1d \
+  --manifest local_data/binance_um_klines/interval=1d/manifests/manifest.json
+```
+
+Validates one machine-specific `local_data` Kline run manifest. `--manifest` is
+**required**; invoking the target without it returns exit `2`. Checks (rule ids
+`KL-*`): manifest exists and is valid JSON, interval supported, manifest interval
+matches the CLI interval, `dataset_id = market.binance.um.klines`,
+`dataset_variant_id = market.binance.um.klines.<INTERVAL>`, primary key
+`[symbol, interval, open_time]`, `checksum_failed_count = 0`, file manifest /
+coverage report / research-access manifest exist, verified files exist on disk,
+daily archive policy recorded, and `.gitignore` excludes `local_data/`.
+
 All target:
 
 ```bash
@@ -172,6 +191,13 @@ Runs registry checks plus the default Universe Metadata artifact/fixture.
 If `data/reference/universe_metadata/reference.universe.metadata.json` exists,
 `--all` validates that Phase 4 artifact; otherwise it falls back to
 `tests/fixtures/universe_metadata/valid_universe_metadata.json`.
+
+**Clone-safe rule.** `--all` must never require `local_data/` to exist. It
+validates the default Kline manifest
+(`local_data/binance_um_klines/interval=1d/manifests/manifest.json`) **only if it
+is present**; otherwise `KL-MANIFEST-EXISTS` is recorded as `skipped` with a
+clear message. A fresh clone therefore passes `--all` and
+`python -m unittest discover tests` with no `local_data/`.
 
 ---
 

@@ -23,8 +23,9 @@ Data plane
   data/                  small committed reference artifacts
 
 Code plane
-  datahub/validation/    registry, lifecycle, naming, dataset validation
-  datahub/ingestion/     Universe Metadata ingestion MVP
+  datahub/validation/    registry, lifecycle, naming, dataset, klines validation
+  datahub/ingestion/     Universe Metadata + Binance Kline ingestion
+  local_data/            large market data (Kline archives) — git-ignored
   scripts/               automation wrappers
   tests/                 unittest suite and fixtures
 
@@ -48,6 +49,18 @@ artifact → manifest/checksums → Phase 3 validator → registry/catalog docs
 
 Universe Metadata remains lifecycle `draft`; Phase 4 validates a draft artifact
 only.
+
+Phase 5 adds a parameterized Binance USD-M Futures Kline pipeline:
+
+```text
+Binance Data Vision archive index → archive discovery (monthly base + daily
+delta) → zip + .CHECKSUM download → SHA-256 verify / resume → local_data
+manifest + coverage + research-access → binance-um-klines validator
+```
+
+`market.binance.um.klines` is registered `draft`; Phase 5 verifies raw archive
+inventory + checksums only (row-level normalization / Parquet is Phase 6). Large
+market data lives under `local_data/` and is never committed.
 
 ---
 
@@ -116,6 +129,25 @@ only.
 | D39 | `registry_version` remains `v0.2.0`. | Registry shape unchanged; artifact metadata fits existing provenance params. |
 | D40 | Committed data artifacts are allowed because total size is small and supports offline validation. | Reproducibility beats avoiding small reference data. |
 
+### Phase 5 — Binance USD-M Kline Historical Pipeline (v0.6.0)
+
+| # | Decision | Why |
+|---|----------|-----|
+| D41 | **Base dataset_id = `market.binance.um.klines`.** | `market`.`exchange`.`product`.`entity` is stable and discoverable; klines are the first market dataset. |
+| D42 | **Interval variant id = `market.binance.um.klines.<INTERVAL>`** (first `…​.1d`). | One family, many intervals; the variant id keeps interval explicit without a new dataset family per interval. |
+| D43 | **Supported intervals are a single source-of-truth tuple** `1d/4h/1h/15m/5m/1m`; nothing hard-codes `1d`. | The task requires `1d` first but full parameterization; one constant prevents drift. Unsupported interval fails loud (exit 2 + allowed list). |
+| D44 | **Primary key = `symbol + interval + open_time`.** | A Kline row is uniquely identified by its open time for a given symbol and interval. |
+| D45 | **Source authority = Binance Data Vision public archive**; monthly = historical base, daily = recent delta; Universe Metadata is cross-check only. | The current active universe omits delisted symbols; the archive index is authoritative for the full historical symbol set. |
+| D46 | **Kline interval and archive package source are kept strictly separate** everywhere (code, schema, docs). | `monthly`/`daily` are packaging, not row periods; conflating them corrupts the schema/PK. |
+| D47 | **Daily recent-delta policy**: by default download monthly + only daily dates not covered by monthly; covered daily files are `skipped_by_default`. Full daily requires `--include-full-daily-history` (recorded in manifest). | Avoids downloading/duplicating data already covered by monthly while keeping a recent delta path. |
+| D48 | **Large market data lives only under `local_data/`** with per-interval roots. | Keeps the repo small and clone-fast; intervals never collide on disk. |
+| D49 | **No large market data is committed**; `.gitignore` excludes `local_data/`; check `git status --short` before commit. | ROOT *Maintainability* + repo must stay clone-safe; market data is machine-specific. |
+| D50 | **`python -m datahub.validation --all` stays clone-safe**: it validates the Kline manifest only if present, else records `KL-MANIFEST-EXISTS` as skipped. The `binance-um-klines` target requires an explicit `--manifest` (else exit 2). | A fresh clone has no `local_data/`; default validation must not require it. Large-data validation is explicit. |
+| D51 | **Manifests/reports/research-access live under `local_data/`** (main `manifest.json`, per-file `files.jsonl`, coverage, missing-files, checksum-failures, run summary, `research_access.json`). | Run state is machine-specific; it belongs with the data, not in VCS. |
+| D52 | **Research-agent access is a generated manifest** plus `docs/research_agent_klines_access.md` with a minimal stdlib read example. | Agents must locate verified archives, inspect coverage, and distinguish interval vs package source without tribal knowledge. |
+| D53 | **`market.binance.um.klines` is registered as `draft`** with a `DATA_CONTRACT.md` contract section and `DATA_CATALOG.md` entry, but **no machine-specific local checksum in the registry** (`provenance.checksum = ""`; per-file checksums live in the local manifest). | Governance says a dataset is not real until registered, but the registry must not store machine-specific local_data run checksums. `registry_version` stays `v0.2.0` (shape unchanged). |
+| D54 | **Checksum mismatch fails loud** (recorded + non-zero exit); HTTP 404 is a genuine missing object (not retried); transient errors retry. | ROOT *Fail loud* + correct provenance. |
+
 ---
 
 ## Artifact Locations
@@ -161,6 +193,10 @@ same.
 - No JSON Schema or CI exists yet.
 - `DATA_CATALOG.md` is still hand-maintained.
 - Snapshot publication is not implemented.
+- Klines (`market.binance.um.klines`): Phase 5 verifies raw archive inventory +
+  checksums only; row-level normalization / Parquet materialization is Phase 6.
+- Klines full historical market data is uncommitted (`local_data/`,
+  machine-specific); the registry stores no single content checksum for it.
 
 ---
 
@@ -179,20 +215,28 @@ same.
 
 ## Pending Work
 
-- **Phase 5+ (post-review):**
-  - Decide contract/artifact validation semantics.
-  - Add historical delist/rename/merge source ingestion.
-  - Add JSON Schema and CI.
-  - Generate `DATA_CATALOG.md` from `dataset_registry.json`.
+- **Phase 6 (post-review) — recommended:**
+  - Normalize verified Kline archives into a primary-keyed
+    (`symbol + interval + open_time`), partitioned Parquet materialization.
+  - Make row-level Kline rules K1–K4 executable on the materialized rows.
+  - Run remaining intervals (`4h`/`1h`/`15m`/`5m`/`1m`) through the pipeline.
+  - Decide whether `--include-full-daily-history` materialization de-duplicates
+    daily/monthly overlap by primary key.
+- **Carried from earlier phases:**
+  - Decide contract/artifact validation semantics (`contract_validated`).
+  - Add historical delist/rename/merge source ingestion for Universe Metadata.
+  - Add JSON Schema and CI; auto-generate `DATA_CATALOG.md` from the registry.
   - Implement immutable, content-addressable snapshots.
-  - Emit validation reports under `reports/`.
 
 ---
 
 ## Future Recommendations
 
+- Never commit `local_data/`; confirm `git status --short` before every commit.
+- Keep the Kline interval and the archive package source (monthly/daily)
+  strictly separate in code, schema, and docs.
+- Keep the registry free of machine-specific local_data run checksums; record
+  per-file checksums in the local manifest instead.
 - Keep raw snapshot reuse by checksum; never overwrite raw data.
-- Keep row data contract-clean; put coverage/provenance in manifest unless the
-  registry contract is intentionally extended.
 - Expand historical coverage with fixture-first tests before touching registry
   lifecycle state.

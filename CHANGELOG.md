@@ -7,6 +7,67 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.6.0] — 2026-06-16
+
+### Added — Phase 5: Binance USD-M Kline Historical Pipeline
+
+- **Parameterized Kline ingestion pipeline** at
+  `datahub/ingestion/binance_um_klines.py`, driven by Kline `interval`
+  (`1d` / `4h` / `1h` / `15m` / `5m` / `1m`); first production interval `1d`,
+  no interval hard-coded. CLI:
+  `python -m datahub.ingestion.binance_um_klines --interval 1d --all`.
+- **Archive discovery** from the Binance Data Vision public archive (S3 listing):
+  full historical symbol discovery, monthly + daily archive package discovery,
+  `catalog/archive_files.jsonl`, `symbols.json`, `discovery_summary.json`.
+- **Downloader** with zip + `.CHECKSUM` download, SHA-256 verification,
+  resume / skip-verified, transient retry, and failure recording. Checksum
+  mismatch fails loud.
+- **Daily recent-delta policy** — monthly is the canonical historical base;
+  daily archives are skipped by default where a monthly package covers the same
+  month (`required_delta` / `skipped_by_default` /
+  `included_by_explicit_full_daily_history`), with an opt-in
+  `--include-full-daily-history`.
+- **Manifests and reports** — main manifest, per-file manifest, coverage summary,
+  missing-files report, checksum-failures report, run summary, and a
+  research-agent access manifest — all under `local_data/` (uncommitted).
+- **Validation integration** — new `binance-um-klines` validation target
+  (`KL-*` rules) requiring an explicit `--manifest`; clone-safe `--all` validates
+  the default Kline manifest only when present and otherwise skips it.
+- **Dataset registration** — `market.binance.um.klines` registered as `draft`
+  with a `DATA_CONTRACT.md` contract section and `DATA_CATALOG.md` entry; primary
+  key `[symbol, interval, open_time]`. No machine-specific local checksum stored
+  in the registry.
+- **Documentation** — `docs/binance_um_klines_dataset.md`,
+  `docs/research_agent_klines_access.md`, `docs/market_data_storage_policy.md`;
+  updated `docs/validation_framework.md`, `QUICKSTART.md`, and `README.md`.
+- **Tests and fixtures** — `tests/test_binance_um_klines.py` and
+  `tests/fixtures/ingestion/binance_um_klines/` covering interval handling,
+  discovery parsing, daily-overlap classification, download / checksum / resume,
+  manifest / coverage / research-access generation, validation integration,
+  clone-safe `--all`, explicit-manifest requirement, and the `.gitignore` rule.
+
+### Changed
+
+- Bumped repo version `v0.5.0` → `v0.6.0`.
+- `.gitignore` now excludes `local_data/`; large market data is never committed.
+- Registered dataset count `1` → `2` in `dataset_registry.json` and
+  `DATA_CATALOG.md`; `registry_version` stays `v0.2.0` (registry contract shape
+  unchanged — only a dataset entry was added).
+- Updated `AGENTS.md` and `HANDOFF.md` for Phase 5 decisions and state.
+
+### Known Gaps
+
+- Phase 5 verifies the **raw archive inventory + checksums** only; row-level
+  normalization and Parquet materialization are deferred to **Phase 6**.
+- Full historical market data is **uncommitted** (`local_data/`, machine-specific).
+- `market.binance.um.klines` remains `draft`; `contract_validated = false`.
+- The registry stores no single content checksum for the Kline family (no
+  committed content); per-file checksums live in the run manifest.
+
+[v0.6.0]: #
+
+---
+
 ## [v0.5.0] — 2026-06-16
 
 ### Added — Phase 4: Universe Metadata Ingestion MVP

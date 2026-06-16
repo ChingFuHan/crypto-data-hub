@@ -2,8 +2,10 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 4 (Universe Metadata Ingestion MVP) — first validated
-> draft artifact exists; Universe Metadata lifecycle remains `draft`.
+> **Current phase:** Phase 5 (Binance USD-M Kline Historical Pipeline) — a
+> parameterized Kline ingestion pipeline exists (first interval `1d`); large
+> market data lives under `local_data/` (uncommitted). Both datasets remain
+> lifecycle `draft`.
 
 ---
 
@@ -37,7 +39,7 @@ work.
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.5.0`).
+- Version: see `VERSION` (currently `v0.6.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -61,11 +63,12 @@ The registry is plain JSON and validates with any standard tool, e.g.:
 python -m json.tool dataset_registry.json
 ```
 
-It currently holds **1 dataset** (`reference.universe.metadata`, `draft`) plus the
-`conventions` and `dataset_entry_schema` blocks (the machine-readable registry
-contract). The registry points to the Phase 4 draft artifact and manifest. See
+It currently holds **2 datasets** (`reference.universe.metadata` and
+`market.binance.um.klines`, both `draft`) plus the `conventions` and
+`dataset_entry_schema` blocks (the machine-readable registry contract). See
 `docs/registry_standard.md` for how entries are structured and discovered, and
-`docs/universe_metadata_dataset.md` for the dataset design.
+`docs/universe_metadata_dataset.md` / `docs/binance_um_klines_dataset.md` for the
+dataset designs.
 
 ## 6. Run validation
 
@@ -104,4 +107,27 @@ Current artifact locations:
 - Manifest: `data/manifests/reference/universe_metadata/manifest.json`
 
 Committed data artifacts are intentionally small reference artifacts for offline
-validation. Large market data remains out of scope.
+validation.
+
+## 8. Run Binance USD-M Kline ingestion (Phase 5)
+
+Parameterized by Kline interval (`1d`/`4h`/`1h`/`15m`/`5m`/`1m`); first
+production interval is `1d`. Large market data goes to `local_data/`
+(**uncommitted**).
+
+```bash
+# inspect first, then download (resumable):
+python -m datahub.ingestion.binance_um_klines --interval 1d --discover
+python -m datahub.ingestion.binance_um_klines --interval 1d --dry-run
+python -m datahub.ingestion.binance_um_klines --interval 1d --all --workers 16
+python -m datahub.ingestion.binance_um_klines --interval 1d --resume --all
+
+# validate a run manifest (explicit; not part of clone-safe --all):
+python -m datahub.validation --target binance-um-klines --interval 1d \
+  --manifest local_data/binance_um_klines/interval=1d/manifests/manifest.json
+```
+
+See `docs/binance_um_klines_dataset.md` (pipeline + CLI),
+`docs/research_agent_klines_access.md` (how to read the data), and
+`docs/market_data_storage_policy.md` (storage / commit rules). The full archive
+is large: prefer `--discover` → `--dry-run` → `--all`, and rely on resume.

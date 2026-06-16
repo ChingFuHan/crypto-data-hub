@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from .binance_um_klines import ALLOWED_INTERVALS, validate_klines_manifest
 from .errors import ValidationCommandError
 from .lifecycle import validate_lifecycle
 from .registry import validate_registry_file
@@ -20,6 +21,10 @@ FALLBACK_UNIVERSE_FIXTURE = (
 )
 
 
+def default_klines_manifest(interval: str) -> str:
+    return f"local_data/binance_um_klines/interval={interval}/manifests/manifest.json"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m datahub.validation",
@@ -27,13 +32,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target",
-        choices=("registry", "universe-metadata"),
+        choices=("registry", "universe-metadata", "binance-um-klines"),
         default="registry",
         help="validation target (default: registry)",
     )
     parser.add_argument(
         "--fixture",
         help="fixture path for --target universe-metadata",
+    )
+    parser.add_argument(
+        "--interval",
+        default="1d",
+        choices=ALLOWED_INTERVALS,
+        help="Kline interval for --target binance-um-klines (default: 1d)",
+    )
+    parser.add_argument(
+        "--manifest",
+        help="klines run manifest path for --target binance-um-klines",
     )
     parser.add_argument(
         "--all",
@@ -62,6 +77,20 @@ def run(args: argparse.Namespace) -> ValidationReport:
         if not fixture.exists():
             raise ValidationCommandError(f"default fixture not found: {fixture}")
         report.extend(validate_fixture(fixture))
+        # Clone-safe: only validate the klines local_data manifest if it exists.
+        klines_manifest = Path(default_klines_manifest(args.interval))
+        if klines_manifest.exists():
+            report.extend(
+                validate_klines_manifest(klines_manifest, args.interval, ".")
+            )
+        else:
+            report.skipped(
+                "KL-MANIFEST-EXISTS",
+                "klines manifest absent; skipped for clone-safe --all "
+                "(provide --target binance-um-klines --manifest to validate local_data)",
+                file=str(klines_manifest),
+                dataset_id="market.binance.um.klines",
+            )
         return report
 
     if args.target == "registry":
@@ -81,6 +110,14 @@ def run(args: argparse.Namespace) -> ValidationReport:
         if not fixture.exists():
             raise ValidationCommandError(f"fixture not found: {fixture}")
         return validate_fixture(fixture)
+
+    if args.target == "binance-um-klines":
+        if not args.manifest:
+            raise ValidationCommandError(
+                "--target binance-um-klines requires --manifest "
+                "(large local_data validation is explicit, never clone-safe default)"
+            )
+        return validate_klines_manifest(args.manifest, args.interval, ".")
 
     raise ValidationCommandError(f"unknown target: {args.target}")
 

@@ -208,6 +208,57 @@
             "tags": ["reference", "universe", "symbols", "lifecycle"],
             "created_at": "2026-06-16T00:00:00Z",
             "updated_at": "2026-06-16T17:01:38Z"
+        },
+        {
+            "dataset_id": "market.binance.um.klines",
+            "dataset_name": "Binance USD-M Futures Klines",
+            "description": "Historical OHLCV Kline bars for Binance USD-M Futures from the Binance Data Vision public archive, parameterized by Kline interval.",
+            "version": "v0.1.0",
+            "status": "draft",
+            "owner": "data-platform",
+            "source": {
+                "type": "file",
+                "reference": "https://data.binance.vision/data/futures/um/{monthly,daily}/klines/<SYMBOL>/<INTERVAL>/ (Binance Data Vision public archive)"
+            },
+            "timezone": "UTC",
+            "update_frequency": "daily",
+            "earliest_timestamp": null,
+            "latest_timestamp": null,
+            "schema_ref": "DATA_CONTRACT.md#contract-binance-usd-m-futures-klines",
+            "primary_key": ["symbol", "interval", "open_time"],
+            "lineage": {
+                "upstream": [],
+                "transformation": "Downloaded and checksum-verified from Binance Data Vision archive packages (monthly historical base + daily recent delta). reference.universe.metadata is a cross-check only, not an authoritative symbol source, because the current active universe omits delisted symbols."
+            },
+            "provenance": {
+                "code_version": "v0.6.0",
+                "params": {
+                    "phase": "Phase 5 Binance USD-M Kline Historical Pipeline",
+                    "supported_intervals": ["1d", "4h", "1h", "15m", "5m", "1m"],
+                    "first_production_interval": "1d",
+                    "interval_variants": "market.binance.um.klines.<INTERVAL>",
+                    "archive_package_sources": ["monthly", "daily"],
+                    "daily_archive_policy": "monthly is canonical historical base; daily downloaded only as recent delta unless --include-full-daily-history",
+                    "local_root": "local_data/binance_um_klines/interval=<INTERVAL>/",
+                    "manifest": "local_data/binance_um_klines/interval=<INTERVAL>/manifests/manifest.json",
+                    "validation_command": "python -m datahub.validation --target binance-um-klines --interval 1d --manifest local_data/binance_um_klines/interval=1d/manifests/manifest.json",
+                    "checksum_policy": "Per-file SHA-256 checksums recorded in the local_data run manifest. No single committed content checksum: full historical market data is intentionally uncommitted and machine-specific.",
+                    "known_coverage_gaps": [
+                        "Full historical market data is not committed; it exists only under local_data/ on the machine that ran the pipeline.",
+                        "Row-level normalization and Parquet materialization are deferred to Phase 6; Phase 5 verifies raw archive inventory + checksums only."
+                    ]
+                },
+                "generated_by": "datahub.ingestion.binance_um_klines",
+                "checksum": ""
+            },
+            "snapshot": null,
+            "quality": {
+                "contract_validated": false,
+                "last_validated_at": null
+            },
+            "tags": ["market", "binance", "usd_m_futures", "klines", "ohlcv"],
+            "created_at": "2026-06-16T00:00:00Z",
+            "updated_at": "2026-06-16T18:00:00Z"
         }
     ]
 }
