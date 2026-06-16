@@ -7,60 +7,65 @@
 
 ## Current Phase
 
-**Phase 2 — First Dataset Design (Universe Metadata)** (complete, awaiting review).
+**Phase 3 — Validation Foundation** (complete, awaiting review).
 
 Delivery model: Architecture First → MVP First → Incremental Delivery →
-Review Before Expansion. **Do not start Phase 3 without review approval.**
+Review Before Expansion. **Do not start Phase 4 without review approval.**
 
 ---
 
 ## Current Status
 
-- Repo version: `v0.3.0`. `registry_version` stays `v0.2.0` (contract shape
-  unchanged — only a dataset entry was added).
-- Phases 0 (`v0.1.0`) and 1 (`v0.2.0`) complete.
-- Phase 2 designed the **first concrete dataset**, Universe Metadata
-  (`reference.universe.metadata`), to validate the Phase 1 governance framework
-  against a real dataset:
-  - Design doc — `docs/universe_metadata_dataset.md`
-  - Contract — `DATA_CONTRACT.md` → *Contract: Universe Metadata*
-  - Registry entry — `dataset_registry.json` `datasets[]` (`draft`, `v0.1.0`)
-  - Catalog entry — `DATA_CATALOG.md` (count 0 → 1)
-- **1 dataset registered**, in `draft` (`contract_validated = false`). No data
-  ingested and no executable code yet (by design — this is a design phase).
-- Awaiting Phase 2 review before any Phase 3 work begins.
+- Repo version: `v0.4.0`. `registry_version` stays `v0.2.0` because the
+  registry contract shape did not change.
+- Phases 0 (`v0.1.0`), 1 (`v0.2.0`), and 2 (`v0.3.0`) are complete.
+- Phase 3 added the first executable validation foundation:
+  - Package entry point — `python -m datahub.validation`
+  - CLI implementation — `datahub/validation/cli.py`
+  - Result/error model — `datahub/validation/result.py`, `errors.py`
+  - Registry validation — `datahub/validation/registry.py`
+  - Lifecycle validation — `datahub/validation/lifecycle.py`
+  - Naming validation — `datahub/validation/naming.py`
+  - Universe Metadata fixture validation — `datahub/validation/universe_metadata.py`
+  - Test fixtures — `tests/fixtures/universe_metadata/`
+  - Test skeleton — `tests/test_*.py`
+  - Framework doc — `docs/validation_framework.md`
+- Universe Metadata (`reference.universe.metadata`) remains `draft` with
+  `quality.contract_validated = false`; no data was ingested in Phase 3.
+- Module execution entry point is `python -m datahub.validation`; on hosts where
+  the launcher is named only `python3`, use `python3 -m ...` for the same checks.
+- Awaiting Phase 3 review before any Phase 4 work begins.
 
 ---
 
 ## Current Priorities
 
-1. Pass Phase 2 review.
-2. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
+1. Pass Phase 3 review.
+2. Keep validation commands green and deterministic.
+3. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
    in sync — registry wins on any conflict.
-3. Keep the Universe Metadata design consistent across its contract, registry
-   entry, catalog entry, and design doc.
+4. Keep the Universe Metadata design consistent across its contract, registry
+   entry, catalog entry, design doc, and validation fixtures.
 
 ---
 
 ## Blocking Issues
 
-- **None blocking Phase 2.**
-- Phase 3 is intentionally blocked pending review (governance, not a defect).
+- **None blocking Phase 3 review.**
+- Phase 4 is intentionally blocked pending review (governance, not a defect).
 
 ---
 
 ## Recommended Next Actions
 
-> Proposals only — execute **after** Phase 2 review approval.
+> Proposals only — execute **after** Phase 3 review approval.
 
-1. Implement registry/contract **validation tooling** in `datahub/` + `scripts/`
-   (enforce `dataset_entry_schema`, lifecycle transitions, naming patterns, and
-   the Universe Metadata quality rules Q1–Q6).
-2. Ingest Universe Metadata data, validate against its contract, and advance it
-   `draft → active`.
-3. Add a JSON Schema for `dataset_registry.json` and enforce it in CI.
-4. Auto-generate `DATA_CATALOG.md` from the registry to remove drift.
-5. Implement the snapshot mechanism per ROOT.md → *Snapshot Principles*.
+1. Ingest Universe Metadata data, validate against Q1–Q6, and advance it
+   `draft → active` only after review.
+2. Add a JSON Schema for `dataset_registry.json` and enforce it in CI.
+3. Auto-generate `DATA_CATALOG.md` from the registry to remove drift.
+4. Implement immutable, content-addressable snapshot creation.
+5. Stand up generated validation reports under `reports/`.
 
 ---
 
@@ -73,11 +78,12 @@ Review Before Expansion. **Do not start Phase 3 without review approval.**
 | `HANDOFF.md` | Architecture, decisions, known issues, pending work. |
 | `README.md` | Project overview and structure. |
 | `QUICKSTART.md` | Fast path to getting started. |
-| `VERSION` | Current semantic version (`v0.3.0`). |
+| `VERSION` | Current semantic version (`v0.4.0`). |
 | `CHANGELOG.md` | Human-readable history of changes. |
 | `DATA_CONTRACT.md` | Dataset Contract Framework — schema + quality rules. |
 | `DATA_CATALOG.md` | Data Catalog Framework — derived human-readable view. |
 | `dataset_registry.json` | Authoritative, machine-readable dataset registry. |
+| `docs/validation_framework.md` | Phase 3 validation architecture and CLI docs. |
 | `docs/dataset_lifecycle.md` | Lifecycle states + transition rules. |
 | `docs/metadata_standard.md` | Metadata fields, types, required rules. |
 | `docs/registry_standard.md` | Registry structure, versioning, discovery. |
@@ -87,9 +93,10 @@ Review Before Expansion. **Do not start Phase 3 without review approval.**
 
 | Directory | Purpose |
 |-----------|---------|
-| `datahub/` | Core platform package (datasets, registry, snapshot logic). |
+| `datahub/` | Core platform package. |
+| `datahub/validation/` | Executable validation framework. |
 | `scripts/` | Automation and operational scripts. |
-| `tests/` | Test suite. |
+| `tests/` | Test suite and fixtures. |
 | `reports/` | Generated reports and quality outputs. |
 | `examples/` | Usage examples. |
 | `logs/` | Runtime logs (git-ignored content). |
@@ -110,6 +117,8 @@ Then, before touching data, read the governance set:
 `DATA_CONTRACT.md` → `docs/metadata_standard.md` → `docs/registry_standard.md`
 → `docs/dataset_lifecycle.md` → `docs/authority_model.md` →
 `docs/naming_convention.md` → `dataset_registry.json`.
+
+For validation work, also read `docs/validation_framework.md`.
 
 ---
 

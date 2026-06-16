@@ -4,8 +4,8 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 2 (First Dataset Design — Universe Metadata) — complete, awaiting review.
-> **Version:** `v0.3.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 3 (Validation Foundation) — complete, awaiting review.
+> **Version:** `v0.4.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,7 +30,7 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.3.0)
+├── VERSION                 # Semantic version (v0.4.0)
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -43,11 +43,13 @@ crypto-data-hub/
 │   ├── registry_standard.md    # Registry structure, versioning, discovery
 │   ├── authority_model.md      # Authority + sync + update model
 │   ├── naming_convention.md    # Naming rules
-│   └── universe_metadata_dataset.md  # First dataset design (Phase 2)
+│   ├── universe_metadata_dataset.md  # First dataset design (Phase 2)
+│   └── validation_framework.md       # Validation framework (Phase 3)
 │
-├── datahub/                # Core platform package (future)
-├── scripts/                # Automation scripts (future)
-├── tests/                  # Test suite (future)
+├── datahub/                # Core platform package
+│   └── validation/         # Executable validation framework
+├── scripts/                # Automation scripts
+├── tests/                  # Test suite and fixtures
 ├── reports/                # Generated reports (future)
 ├── examples/               # Usage examples (future)
 └── logs/                   # Runtime logs
@@ -72,6 +74,13 @@ governance set: [`DATA_CONTRACT.md`](DATA_CONTRACT.md),
 [`docs/authority_model.md`](docs/authority_model.md),
 [`docs/naming_convention.md`](docs/naming_convention.md), and
 [`dataset_registry.json`](dataset_registry.json).
+
+Run current validation checks from repo root:
+
+```bash
+python -m datahub.validation --all
+python -m unittest discover tests
+```
 
 ---
 

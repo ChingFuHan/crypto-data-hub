@@ -1,0 +1,38 @@
+{
+  "dataset_id": "reference.universe.metadata",
+  "ingestion_time": "2026-06-16T00:00:00Z",
+  "records": [
+    {
+      "instrument_id": "binance.cyclea.spot.2020",
+      "symbol": "CYCLEA",
+      "exchange": "binance",
+      "base_asset": "CYA",
+      "quote_asset": "USDT",
+      "market_type": "spot",
+      "contract_type": null,
+      "status": "renamed",
+      "listed_at": "2020-01-01T00:00:00Z",
+      "delisted_at": "2024-01-01T00:00:00Z",
+      "successor_id": "binance.cycleb.spot.2024",
+      "tick_size": "0.01",
+      "step_size": "1",
+      "contract_size": null
+    },
+    {
+      "instrument_id": "binance.cycleb.spot.2024",
+      "symbol": "CYCLEB",
+      "exchange": "binance",
+      "base_asset": "CYB",
+      "quote_asset": "USDT",
+      "market_type": "spot",
+      "contract_type": null,
+      "status": "renamed",
+      "listed_at": "2024-01-01T00:00:00Z",
+      "delisted_at": "2025-01-01T00:00:00Z",
+      "successor_id": "binance.cyclea.spot.2020",
+      "tick_size": "0.01",
+      "step_size": "1",
+      "contract_size": null
+    }
+  ]
+}

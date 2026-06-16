@@ -7,6 +7,50 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.4.0] — 2026-06-16
+
+### Added — Phase 3: Validation Foundation
+
+- **Validation architecture** under `datahub/validation/`, including module
+  execution with `python -m datahub.validation`.
+- **Validation result model** with per-rule `rule_id`, `severity`, `status`,
+  affected file, dataset id, field, location, and details.
+- **Validation CLI** with registry, Universe Metadata fixture, and `--all`
+  targets plus exit codes `0` / `1` / `2`.
+- **Registry validation** for JSON validity, registry contract blocks, required
+  fields, field types, naming patterns, status enum, timestamps, quality,
+  provenance, and lineage references.
+- **Lifecycle validation** for current draft datasets plus transition and
+  active/deprecated/archived skeleton checks.
+- **Naming validation** for dataset ids, versions, schema refs, timestamps, and
+  dataset-related paths.
+- **Universe Metadata fixture validation** for Q1-Q6 plus point-in-time
+  symbol-era reconstruction (`UM-PIT`).
+- **Synthetic test fixtures** for valid and invalid Universe Metadata cases.
+- **Stdlib unittest skeleton** covering registry, lifecycle, naming, Universe
+  Metadata fixtures, and CLI exit codes.
+- **Validation documentation** in `docs/validation_framework.md`.
+
+### Changed
+
+- Bumped repo version `v0.3.0` → `v0.4.0`.
+- Updated `AGENTS.md`, `HANDOFF.md`, README/quickstart status text, and related
+  governance notes for Phase 3 review state.
+- `registry_version` stays `v0.2.0` because the registry contract shape did not
+  change.
+
+### Known Gaps
+
+- Universe Metadata remains `draft`; no external data was ingested.
+- Active/deprecated/archived lifecycle checks are skeletons until those states
+  exist in the registry.
+- No JSON Schema, CI workflow, catalog generation, snapshot mechanism, or
+  persisted report generation exists yet.
+
+[v0.4.0]: #
+
+---
+
 ## [v0.3.0] — 2026-06-16
 
 ### Added — Phase 2: First Dataset Design (Universe Metadata)

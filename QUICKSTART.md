@@ -2,9 +2,8 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 2 (First Dataset Design — Universe Metadata) — the
-> first dataset is designed and registered as `draft`; no data ingested and no
-> executable pipeline yet. This guide covers onboarding and the governance docs.
+> **Current phase:** Phase 3 (Validation Foundation) — executable validation
+> exists; Universe Metadata remains `draft`; no data ingestion yet.
 
 ---
 
@@ -30,13 +29,14 @@ Data plane:  DATA_CONTRACT.md · dataset_registry.json · DATA_CATALOG.md
 Code plane:  datahub/ · scripts/ · tests/ · reports/ · examples/ · logs/ · docs/
 ```
 
-The data-plane directories are skeletons in Phase 0 and fill in later phases.
+The validation package now lives in `datahub/validation/`; data ingestion and
+snapshot directories remain future work.
 
 ---
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.3.0`).
+- Version: see `VERSION` (currently `v0.4.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -64,3 +64,12 @@ It currently holds **1 dataset** (`reference.universe.metadata`, `draft`) plus t
 `conventions` and `dataset_entry_schema` blocks (the machine-readable registry
 contract). See `docs/registry_standard.md` for how entries are structured and
 discovered, and `docs/universe_metadata_dataset.md` for the dataset design.
+
+## 6. Run validation
+
+```bash
+python -m datahub.validation --all
+python -m unittest discover tests
+```
+
+If your environment exposes only `python3`, use `python3 -m ...`.

@@ -71,7 +71,7 @@ Each entry mirrors its registry record (including lifecycle `status`, which may 
 - **Source:** api — exchange instrument / exchangeInfo endpoints (aggregated)
 - **Schema:** see `DATA_CONTRACT.md#contract-universe-metadata`
 - **Update Frequency:** daily
-- **Known Issues:** Draft design; no data ingested in Phase 2 (`contract_validated = false`). `earliest_timestamp` / `latest_timestamp` are null until first publication.
+- **Known Issues:** Draft design; no data ingested yet (`contract_validated = false`). `earliest_timestamp` / `latest_timestamp` are null until first publication.
 - **Status:** draft
 
 Full design: [`docs/universe_metadata_dataset.md`](docs/universe_metadata_dataset.md).

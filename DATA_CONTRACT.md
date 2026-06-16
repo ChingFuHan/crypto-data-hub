@@ -223,7 +223,7 @@ new contract. Fill every placeholder; do not leave a section blank. The
 |------|-------|
 | Contract framework defined (this document) | Done (v0.2.0) |
 | Concrete dataset contracts | 1 defined — Universe Metadata (`reference.universe.metadata`) |
-| Automated validation tooling | Pending (later phase, after review) |
+| Automated validation tooling | Initial foundation done (v0.4.0; registry/lifecycle/naming + Universe Metadata fixtures) |
 | Machine-readable schema (JSON Schema) | Pending (later phase, after review) |
 
 The framework and reusable template are defined above. The first concrete

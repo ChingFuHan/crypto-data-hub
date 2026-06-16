@@ -1,0 +1,38 @@
+{
+  "dataset_id": "reference.universe.metadata",
+  "ingestion_time": "2026-06-16T00:00:00Z",
+  "records": [
+    {
+      "instrument_id": "binance.btcusdt.spot.2020",
+      "symbol": "BTCUSDT",
+      "exchange": "binance",
+      "base_asset": "BTC",
+      "quote_asset": "USDT",
+      "market_type": "spot",
+      "contract_type": null,
+      "status": "active",
+      "listed_at": "2020-01-01T00:00:00Z",
+      "delisted_at": null,
+      "successor_id": null,
+      "tick_size": "0.01",
+      "step_size": "0.000001",
+      "contract_size": null
+    },
+    {
+      "instrument_id": "binance.btcusdt.spot.2020",
+      "symbol": "BTCUSDT2",
+      "exchange": "binance",
+      "base_asset": "BTC",
+      "quote_asset": "USDT",
+      "market_type": "spot",
+      "contract_type": null,
+      "status": "active",
+      "listed_at": "2021-01-01T00:00:00Z",
+      "delisted_at": null,
+      "successor_id": null,
+      "tick_size": "0.01",
+      "step_size": "0.000001",
+      "contract_size": null
+    }
+  ]
+}
