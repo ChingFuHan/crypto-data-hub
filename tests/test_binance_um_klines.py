@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -411,6 +412,137 @@ class RepoPolicyTests(unittest.TestCase):
         gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
         entries = {line.strip() for line in gitignore.splitlines()}
         self.assertIn("local_data/", entries)
+
+
+# --------------------------------------------------------------------------- #
+# Memory / streaming tests (Phase 5 OOM hotfix)
+# --------------------------------------------------------------------------- #
+
+
+class PaginatedBackend(kl.HttpArchiveBackend):
+    """HttpArchiveBackend whose _get serves the two paginated fixture pages."""
+
+    def __init__(self):
+        super().__init__()
+        self.page1 = (FIXTURE_DIR / "paginated_listing_page1.xml").read_bytes()
+        self.page2 = (FIXTURE_DIR / "paginated_listing_page2.xml").read_bytes()
+
+    def _get(self, url):
+        # page 2 is requested with a non-empty marker
+        if "marker=data%2Ffutures" in url or "marker=data/futures" in url:
+            return self.page2
+        return self.page1
+
+
+class FailingBackend(kl.ArchiveBackend):
+    """Lists one symbol, then fails (after retries) on the file listing."""
+
+    def iter_objects(self, prefix):
+        if prefix.endswith("/klines/"):
+            yield None, prefix + "AAAUSDT/"
+        else:
+            raise kl.TransientDownloadError("simulated listing failure")
+
+    def download(self, key):
+        raise kl.ObjectNotFound(key)
+
+
+class StreamingTests(unittest.TestCase):
+    def test_listing_pagination_collects_all_pages(self):
+        backend = PaginatedBackend()
+        contents, _ = backend.list_objects(
+            "data/futures/um/monthly/klines/BTCUSDT/1d/"
+        )
+        keys = [entry.key for entry in contents]
+        # 3 zips + 3 checksums spanning both pages
+        self.assertEqual(len([k for k in keys if k.endswith(".zip")]), 3)
+        self.assertIn(
+            "data/futures/um/monthly/klines/BTCUSDT/1d/BTCUSDT-1d-2020-03.zip", keys
+        )
+
+    def test_pagination_feeds_symbol_records(self):
+        config = kl.Config(
+            interval="1d", local_root=Path("/tmp/x"), archive_source="monthly",
+            include_full_daily_history=False, resume=False, dry_run=False,
+            workers=2, timeout=5, retries=0, symbols_file=None, max_symbols=None,
+        )
+        records = kl.list_symbol_archive_files(
+            config, PaginatedBackend(), "monthly", "BTCUSDT", "2026-06-16T00:00:00Z"
+        )
+        periods = sorted(r["archive_period"] for r in records)
+        self.assertEqual(periods, ["2020-01", "2020-02", "2020-03"])
+
+    def test_archive_files_written_incrementally(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_fake_archive(tmp)
+            backend = kl.LocalArchiveBackend(tmp)
+            config = make_config(tmp)
+            kl.run_pipeline(config, backend, {"discover"}, now="2026-06-16T00:00:00Z")
+            jsonl_path = config.catalog_dir / "archive_files.jsonl"
+            summary = json.loads(
+                (config.catalog_dir / "discovery_summary.json").read_text()
+            )
+            line_count = sum(
+                1 for line in jsonl_path.read_text().splitlines() if line.strip()
+            )
+            # every discovered record is a line in the incrementally-written jsonl
+            self.assertEqual(line_count, summary["total_archive_file_count"])
+            self.assertTrue((config.catalog_dir / "symbols.json").exists())
+
+    def test_stream_discover_calls_sink_per_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_fake_archive(tmp)
+            backend = kl.LocalArchiveBackend(tmp)
+            config = make_config(tmp)
+            seen = []
+            aggregate, symbols = kl.stream_discover(
+                config, backend, "2026-06-16T00:00:00Z", seen.append
+            )
+            # sink invoked exactly once per record — never bulk-buffered
+            self.assertEqual(len(seen), aggregate.total_file_count)
+            self.assertGreater(aggregate.total_file_count, 0)
+
+    def test_bounded_map_keeps_window_bounded(self):
+        import threading
+
+        live = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def work(item):
+            nonlocal live, peak
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            time.sleep(0.005)
+            with lock:
+                live -= 1
+            return item
+
+        results = [r for _, r in kl.bounded_map(work, range(50), workers=4)]
+        self.assertEqual(sorted(results), list(range(50)))
+        self.assertLessEqual(peak, 4)  # never more than `workers` in flight
+
+    def test_discovery_failure_raises_klines_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = make_config(tmp, archive_source="monthly")
+            with self.assertRaises(kl.KlinesError):
+                kl.run_pipeline(
+                    config, FailingBackend(), {"discover"}, now="2026-06-16T00:00:00Z"
+                )
+
+    def test_cli_discovery_failure_exit_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = kl.backend_from_args
+            kl.backend_from_args = lambda args, config: FailingBackend()
+            try:
+                code = kl.main(
+                    ["--interval", "1d", "--discover", "--archive-source", "monthly",
+                     "--local-root", str(Path(tmp) / "ld"), "--quiet"]
+                )
+            finally:
+                kl.backend_from_args = original
+            self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":
