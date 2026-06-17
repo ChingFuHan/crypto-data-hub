@@ -65,8 +65,8 @@ Repo：
 4h raw：
 
     interval=4h
-    discovered_symbol_count=921
-    planned_download_count=32656
+    symbol_count=921
+    downloaded_count=32656
     downloaded_count=32656
     verified_count=32656
     failed_count=0
@@ -176,10 +176,10 @@ for k in [
     "dataset_id",
     "dataset_variant_id",
     "interval",
-    "archive_source",
-    "discovered_symbol_count",
-    "total_archive_file_count",
-    "planned_download_count",
+    "archive_package_sources",
+    "symbol_count",
+    "file_count",
+    "downloaded_count",
     "downloaded_count",
     "verified_count",
     "failed_count",

@@ -50,8 +50,8 @@ Repo：
 4h raw 結果：
 
     interval=4h
-    discovered_symbol_count=921
-    planned_download_count=32656
+    symbol_count=921
+    downloaded_count=32656
     downloaded_count=32656
     verified_count=32656
     failed_count=0
@@ -386,7 +386,7 @@ Manifest 至少包含：
 Full output：
 
     output_scope=FULL_OUTPUT
-    raw_discovered_symbol_count=921
+    raw_symbol_count=921
     symbol_count=921
     failed_symbol_count=0
 
