@@ -1,4 +1,4 @@
-"""Materialize Binance USD-M Futures 1D Kline raw archive into Parquet.
+"""Materialize Binance USD-M Futures Kline raw archives into Parquet.
 
 Layer model
 -----------
@@ -65,17 +65,20 @@ else:
 # --------------------------------------------------------------------------- #
 
 RAW_DATASET_ID = "market.binance.um.klines"
-MATERIALIZED_DATASET_ID = "market.binance.um.klines.1d.parquet"
-CODE_VERSION = "v0.7.0"
+CODE_VERSION = "v0.8.0"
 QUERY_ENGINE = "duckdb"
 OUTPUT_FORMAT = "parquet"
 
-ALLOWED_INTERVALS: tuple[str, ...] = ("1d",)
+ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h")
+INTERVAL_MILLISECONDS = {
+    "1d": 86_400_000,
+    "4h": 14_400_000,
+}
+ROWS_PER_SYMBOL_DATE_LIMIT = {
+    "1d": 1,
+    "4h": 6,
+}
 PRIMARY_KEY: tuple[str, ...] = ("symbol", "interval", "open_time")
-
-DEFAULT_RAW_ROOT = "local_data/binance_um_klines/interval=1d/raw"
-DEFAULT_MANIFEST = "local_data/binance_um_klines/interval=1d/manifests/manifest.json"
-DEFAULT_OUTPUT_ROOT = "local_data/binance_um_klines/interval=1d/parquet"
 
 FULL_OUTPUT = "FULL_OUTPUT"
 SAMPLE_OUTPUT = "SAMPLE_OUTPUT"
@@ -160,6 +163,22 @@ def git_commit() -> str:
         return "unknown"
 
 
+def materialized_dataset_id(interval: str) -> str:
+    return f"{RAW_DATASET_ID}.{interval}.parquet"
+
+
+def default_raw_root(interval: str) -> str:
+    return f"local_data/binance_um_klines/interval={interval}/raw"
+
+
+def default_manifest(interval: str) -> str:
+    return f"local_data/binance_um_klines/interval={interval}/manifests/manifest.json"
+
+
+def default_output_root(interval: str) -> str:
+    return f"local_data/binance_um_klines/interval={interval}/parquet"
+
+
 def require_pyarrow() -> None:
     if pa is None:
         raise DependencyError(
@@ -172,9 +191,19 @@ def validate_interval(interval: str) -> str:
     if interval not in ALLOWED_INTERVALS:
         raise MaterializationCommandError(
             f"unsupported interval: {interval!r}; "
-            f"only {' '.join(ALLOWED_INTERVALS)} is supported in Phase 6"
+            f"supported intervals: {' '.join(ALLOWED_INTERVALS)}"
         )
     return interval
+
+
+def interval_milliseconds(interval: str) -> int:
+    validate_interval(interval)
+    return INTERVAL_MILLISECONDS[interval]
+
+
+def rows_per_symbol_date_limit(interval: str) -> int:
+    validate_interval(interval)
+    return ROWS_PER_SYMBOL_DATE_LIMIT[interval]
 
 
 # --------------------------------------------------------------------------- #
@@ -245,7 +274,7 @@ def _to_int(value: str, field_name: str) -> int:
 
 @dataclass
 class KlineRecord:
-    """One normalized 1D Kline bar (physical + partition fields)."""
+    """One normalized Kline bar (physical + partition fields)."""
 
     symbol: str
     interval: str
@@ -348,6 +377,9 @@ class SymbolResult:
     conflict_samples: list[dict] = field(default_factory=list)
     quality_samples: list[dict] = field(default_factory=list)
     duplicate_date_count: int = 0
+    rows_per_date_violation_count: int = 0
+    rows_per_date_samples: list[dict] = field(default_factory=list)
+    max_rows_per_date: int = 0
     archive_sources: set[str] = field(default_factory=set)
 
 
@@ -465,19 +497,36 @@ def normalize_symbol(
 
     result.rows = [by_key[k] for k in sorted(by_key)]
 
-    # 1D invariant: date must be unique per symbol. dedup-by-open_time gives
-    # this for well-formed data; detect violations explicitly.
-    seen_dates: set[str] = set()
+    date_counts: dict[str, int] = {}
     for rec in result.rows:
-        if rec.date in seen_dates:
-            result.duplicate_date_count += 1
-            if strict:
-                raise StrictModeError(
-                    f"strict: duplicate date {rec.date} for {symbol}"
-                )
-        seen_dates.add(rec.date)
-    if result.duplicate_date_count:
-        result.quality_issue_count += result.duplicate_date_count
+        date_counts[rec.date] = date_counts.get(rec.date, 0) + 1
+    result.max_rows_per_date = max(date_counts.values(), default=0)
+
+    per_date_limit = rows_per_symbol_date_limit(interval)
+    for date, count in sorted(date_counts.items()):
+        if count <= per_date_limit:
+            continue
+        result.rows_per_date_violation_count += 1
+        if interval == "1d":
+            result.duplicate_date_count += count - per_date_limit
+        _record_sample(
+            result.rows_per_date_samples,
+            sample_cap,
+            {
+                "symbol": symbol,
+                "date": date,
+                "row_count": count,
+                "limit": per_date_limit,
+                "interval": interval,
+            },
+        )
+        if strict:
+            raise StrictModeError(
+                f"strict: {count} rows for {symbol} date={date}; "
+                f"limit={per_date_limit} for interval={interval}"
+            )
+    if result.rows_per_date_violation_count:
+        result.quality_issue_count += result.rows_per_date_violation_count
 
     return result
 
@@ -523,6 +572,31 @@ def find_ohlc_violations(rows: Iterable[KlineRecord]) -> list[dict]:
                     "close": r.close,
                 }
             )
+    return bad
+
+
+def find_time_rule_violations(
+    rows: Iterable[KlineRecord], *, interval: str
+) -> list[dict]:
+    bad: list[dict] = []
+    ms = interval_milliseconds(interval)
+    expected_delta = ms - 1
+    for r in rows:
+        aligned = r.open_time % ms == 0
+        close_ok = r.close_time == r.open_time + expected_delta
+        if aligned and close_ok:
+            continue
+        bad.append(
+            {
+                "symbol": r.symbol,
+                "interval": r.interval,
+                "open_time": r.open_time,
+                "close_time": r.close_time,
+                "date": r.date,
+                "open_time_mod": r.open_time % ms,
+                "expected_close_time": r.open_time + expected_delta,
+            }
+        )
     return bad
 
 
@@ -625,14 +699,19 @@ class SymbolWriteResult:
     conflict_count: int
     quality_issue_count: int
     duplicate_date_count: int
+    rows_per_date_violation_count: int
+    max_rows_per_date: int
     ohlc_violation_count: int
+    time_rule_violation_count: int
     archive_sources: list[str]
     status: str = "ok"  # "ok" | "failed" | "skipped"
     error: str | None = None
     conflict_samples: list[dict] = field(default_factory=list)
     duplicate_samples: list[dict] = field(default_factory=list)
     quality_samples: list[dict] = field(default_factory=list)
+    rows_per_date_samples: list[dict] = field(default_factory=list)
     ohlc_samples: list[dict] = field(default_factory=list)
+    time_rule_samples: list[dict] = field(default_factory=list)
 
     def to_sidecar(self) -> dict:
         return {
@@ -648,7 +727,10 @@ class SymbolWriteResult:
             "conflict_count": self.conflict_count,
             "quality_issue_count": self.quality_issue_count,
             "duplicate_date_count": self.duplicate_date_count,
+            "rows_per_date_violation_count": self.rows_per_date_violation_count,
+            "max_rows_per_date": self.max_rows_per_date,
             "ohlc_violation_count": self.ohlc_violation_count,
+            "time_rule_violation_count": self.time_rule_violation_count,
             "archive_sources": self.archive_sources,
             "status": self.status,
         }
@@ -663,7 +745,7 @@ def symbol_sidecar_path(output_root: Path, symbol: str) -> Path:
 
 
 def write_symbol_parquet(
-    result: SymbolResult, output_root: Path
+    result: SymbolResult, output_root: Path, *, interval: str
 ) -> SymbolWriteResult:
     """Write one symbol's rows to Hive-partitioned parquet (year per file)."""
     require_pyarrow()
@@ -674,6 +756,7 @@ def write_symbol_parquet(
 
     rows = result.rows
     ohlc_bad = find_ohlc_violations(rows)
+    time_bad = find_time_rule_violations(rows, interval=interval)
     by_year: dict[int, list[KlineRecord]] = {}
     for rec in rows:
         by_year.setdefault(rec.year, []).append(rec)
@@ -702,12 +785,17 @@ def write_symbol_parquet(
         conflict_count=result.conflict_count,
         quality_issue_count=result.quality_issue_count,
         duplicate_date_count=result.duplicate_date_count,
+        rows_per_date_violation_count=result.rows_per_date_violation_count,
+        max_rows_per_date=result.max_rows_per_date,
         ohlc_violation_count=len(ohlc_bad),
+        time_rule_violation_count=len(time_bad),
         archive_sources=sorted(result.archive_sources),
         conflict_samples=result.conflict_samples,
         duplicate_samples=result.duplicate_samples,
         quality_samples=result.quality_samples,
+        rows_per_date_samples=result.rows_per_date_samples,
         ohlc_samples=ohlc_bad[:20],
+        time_rule_samples=time_bad[:20],
     )
 
 
@@ -828,7 +916,12 @@ def process_symbol(
             conflict_count=sidecar.get("conflict_count", 0),
             quality_issue_count=sidecar.get("quality_issue_count", 0),
             duplicate_date_count=sidecar.get("duplicate_date_count", 0),
+            rows_per_date_violation_count=sidecar.get(
+                "rows_per_date_violation_count", 0
+            ),
+            max_rows_per_date=sidecar.get("max_rows_per_date", 0),
             ohlc_violation_count=sidecar.get("ohlc_violation_count", 0),
+            time_rule_violation_count=sidecar.get("time_rule_violation_count", 0),
             archive_sources=sidecar.get("archive_sources", []),
             status="skipped",
         )
@@ -837,11 +930,18 @@ def process_symbol(
         normalized = normalize_symbol(
             symbol, specs, interval=interval, strict=strict
         )
-        write_result = write_symbol_parquet(normalized, output_root)
+        write_result = write_symbol_parquet(
+            normalized, output_root, interval=interval
+        )
         if strict and write_result.ohlc_violation_count:
             raise StrictModeError(
                 f"strict: {write_result.ohlc_violation_count} OHLC violations "
                 f"for {symbol}"
+            )
+        if strict and write_result.time_rule_violation_count:
+            raise StrictModeError(
+                f"strict: {write_result.time_rule_violation_count} time-rule "
+                f"violations for {symbol}"
             )
         _write_sidecar(output_root, write_result)
         return write_result
@@ -866,7 +966,10 @@ def process_symbol(
             conflict_count=0,
             quality_issue_count=0,
             duplicate_date_count=0,
+            rows_per_date_violation_count=0,
+            max_rows_per_date=0,
             ohlc_violation_count=0,
+            time_rule_violation_count=0,
             archive_sources=[],
             status="failed",
             error=str(exc),
@@ -996,7 +1099,7 @@ def _build_manifest(
     output_scope = FULL_OUTPUT if is_full else SAMPLE_OUTPUT
 
     return {
-        "materialized_dataset_id": MATERIALIZED_DATASET_ID,
+        "materialized_dataset_id": materialized_dataset_id(config.interval),
         "interval": config.interval,
         "input_manifest": str(config.manifest),
         "output_root": str(config.output_root),
@@ -1032,7 +1135,7 @@ def _write_reports(
     reports_dir.mkdir(parents=True, exist_ok=True)
 
     coverage = {
-        "materialized_dataset_id": MATERIALIZED_DATASET_ID,
+        "materialized_dataset_id": materialized_dataset_id(config.interval),
         "interval": config.interval,
         "output_scope": manifest["output_scope"],
         "raw_discovered_symbol_count": manifest["raw_discovered_symbol_count"],
@@ -1052,6 +1155,7 @@ def _write_reports(
                 "date_max": r.date_max,
                 "status": r.status,
                 "archive_sources": r.archive_sources,
+                "max_rows_per_date": r.max_rows_per_date,
             }
             for r in sorted(results, key=lambda x: x.symbol)
         ],
@@ -1090,13 +1194,24 @@ def _write_reports(
     duplicate_date_count = sum(
         r.duplicate_date_count for r in results if r.status in ("ok", "skipped")
     )
+    rows_per_date_violation_count = sum(
+        r.rows_per_date_violation_count
+        for r in results
+        if r.status in ("ok", "skipped")
+    )
     ohlc_violation_count = sum(
         r.ohlc_violation_count for r in results if r.status in ("ok", "skipped")
+    )
+    time_rule_violation_count = sum(
+        r.time_rule_violation_count for r in results if r.status in ("ok", "skipped")
     )
     data_quality = {
         "quality_issue_count": quality_issue_count,
         "duplicate_date_count": duplicate_date_count,
+        "rows_per_date_limit": rows_per_symbol_date_limit(config.interval),
+        "rows_per_date_violation_count": rows_per_date_violation_count,
         "ohlc_violation_count": ohlc_violation_count,
+        "time_rule_violation_count": time_rule_violation_count,
         "failed_symbol_count": manifest["failed_symbol_count"],
         "failed_symbols": [
             {"symbol": r.symbol, "error": r.error}
@@ -1109,10 +1224,17 @@ def _write_reports(
             "low <= open, low <= close",
             "volume >= 0, quote_volume >= 0, trade_count >= 0",
             "date derived from open_time_taipei calendar date",
-            "no duplicate date per symbol for interval=1d",
+            f"open_time aligned to interval={config.interval}",
+            "close_time = open_time + interval_ms - 1",
+            (
+                "rows per (symbol, date) <= "
+                f"{rows_per_symbol_date_limit(config.interval)}"
+            ),
         ],
         "same_source_inconsistency_samples": _collect(results, "quality_samples"),
+        "rows_per_date_samples": _collect(results, "rows_per_date_samples"),
         "ohlc_violation_samples": _collect(results, "ohlc_samples"),
+        "time_rule_violation_samples": _collect(results, "time_rule_samples"),
     }
     (reports_dir / "data_quality_report.json").write_text(
         pretty_json(data_quality), encoding="utf-8"
@@ -1146,7 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m datahub.materialization.binance_um_klines_parquet",
         description=(
-            "Materialize the Binance USD-M 1D Kline raw zip archive into a "
+            "Materialize Binance USD-M Kline raw zip archives into a "
             "DuckDB-queryable Hive-partitioned Parquet dataset."
         ),
     )
@@ -1163,9 +1285,18 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="materialize only these symbols (SAMPLE_OUTPUT)",
     )
-    parser.add_argument("--raw-root", default=DEFAULT_RAW_ROOT)
-    parser.add_argument("--manifest", default=DEFAULT_MANIFEST)
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--raw-root",
+        help="raw archive root (default: local_data/.../interval=<INTERVAL>/raw)",
+    )
+    parser.add_argument(
+        "--manifest",
+        help="raw run manifest (default: local_data/.../interval=<INTERVAL>/manifests/manifest.json)",
+    )
+    parser.add_argument(
+        "--output-root",
+        help="parquet output root (default: local_data/.../interval=<INTERVAL>/parquet)",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--workers", type=int, default=4)
@@ -1191,9 +1322,9 @@ def main(argv: list[str] | None = None) -> int:
 
     config = RunConfig(
         interval=args.interval,
-        raw_root=Path(args.raw_root),
-        manifest=Path(args.manifest),
-        output_root=Path(args.output_root),
+        raw_root=Path(args.raw_root or default_raw_root(args.interval)),
+        manifest=Path(args.manifest or default_manifest(args.interval)),
+        output_root=Path(args.output_root or default_output_root(args.interval)),
         symbols=args.symbols,
         all_symbols=args.all_symbols,
         resume=args.resume,

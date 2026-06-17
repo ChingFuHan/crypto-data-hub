@@ -7,6 +7,38 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.8.0] — 2026-06-18
+
+### Added — Phase 7: Binance UM 4H Kline Parquet Materialization
+
+- **Interval-aware materializer** — `binance_um_klines_parquet.py` extended from
+  1D-only to `--interval {1d,4h}`. Raw-root / manifest / output-root defaults are
+  now derived from the interval, and `materialized_dataset_id` is
+  `market.binance.um.klines.<interval>.parquet`. 1D behaviour is preserved
+  (regression-tested).
+- **4H time policy** — `open_time % 14_400_000 == 0` and
+  `close_time = open_time + 14_399_999`, enforced at materialization
+  (`find_time_rule_violations`, `--strict` fails) and re-checked in validation
+  (`PQ-OPEN-TIME-ALIGNMENT`, `PQ-CLOSE-TIME-RULE`).
+- **4H key policy** — unique key stays `(symbol, interval, open_time)`; `(symbol,
+  date)` becomes a grouping column with **≤ 6 rows/day** (1D stays ≤ 1). Replaces
+  the 1D-only duplicate-date check with a per-interval cardinality limit
+  (`PQ-SYMBOL-DATE-LIMIT`).
+- **4H Parquet dataset** at
+  `local_data/binance_um_klines/interval=4h/parquet/` — `FULL_OUTPUT`,
+  `symbol_count = 921`, `failed_symbol_count = 0`, `generated_csv_file_count = 0`,
+  same Hive layout (`symbol=<S>/year=<Y>/part-000.parquet`).
+- **Validation** — `binance-um-klines-parquet --interval 4h`; adds
+  `PQ-FULL-SYMBOL-COVERAGE` and a `PQ-4H-ROWS-GT-1D` regression (4h row_count must
+  exceed 1D) gated to production FULL_OUTPUT.
+- **Dataset registration** — `market.binance.um.klines.4h.parquet` registered as
+  `draft` with `DATA_CATALOG.md` entry.
+- **Tests** — header/header-less 4H CSV, 4h alignment + close-time, ≤6 rows/day
+  legal, >6 rows/day detected, strict conflict, resume skip, DuckDB read, and 1D
+  regression. `82` tests pass.
+
+---
+
 ## [v0.7.0] — 2026-06-17
 
 ### Added — Phase 6: Binance UM 1D Kline Parquet Materialization

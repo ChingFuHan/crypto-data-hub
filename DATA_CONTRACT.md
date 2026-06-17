@@ -321,49 +321,64 @@ imputed or coerced — a missing required value fails loud (`ROOT.md` → *Fail 
 ## Contract: Binance USD-M Futures Klines
 
 > Concrete dataset contract for the parameterized Binance USD-M Futures Kline
-> family. The registry entry for `market.binance.um.klines` references this
-> section via `schema_ref`. Full design is in
-> [docs/binance_um_klines_dataset.md](docs/binance_um_klines_dataset.md).
+> family and its Parquet materialized interval datasets. The registry entries
+> for `market.binance.um.klines` and
+> `market.binance.um.klines.<INTERVAL>.parquet` reference this section via
+> `schema_ref`. Full design is in
+> [docs/binance_um_klines_dataset.md](docs/binance_um_klines_dataset.md) and
+> [docs/binance_um_klines_parquet_materialization.md](docs/binance_um_klines_parquet_materialization.md).
 
 **Dataset name:** Binance USD-M Futures Klines
-**Dataset ID:** `market.binance.um.klines`  (interval variants: `market.binance.um.klines.<INTERVAL>`)
+**Dataset ID:** `market.binance.um.klines`  (raw family; materialized variants:
+`market.binance.um.klines.1d.parquet`, `market.binance.um.klines.4h.parquet`)
 **Contract version:** `v0.1.0`  (moves with the dataset version)
 **Owner:** `data-platform`
-**Status:** `draft`  (dataset lifecycle; Phase 5 verifies raw archives only)
+**Status:** `draft`  (raw and Parquet artifacts are validated draft outputs)
 **Description:** Historical OHLCV Kline bars for Binance USD-M Futures, ingested
-from the Binance Data Vision public archive, parameterized by Kline interval.
+from the Binance Data Vision public archive and materialized by interval.
 **Source:** `file` — Binance Data Vision public archive
 (`https://data.binance.vision/data/futures/um/{monthly,daily}/klines/<SYMBOL>/<INTERVAL>/`)
 **Source timezone:** `UTC`  (storage: UTC, ISO 8601 / epoch milliseconds)
 **Primary key:** `[symbol, interval, open_time]`  (unique, non-null)
-**Supported intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `1m`  (first production interval `1d`)
+**Supported raw intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `1m`
+**Materialized Parquet intervals:** `1d` · `4h`
 
 > **Kline interval vs archive package source.** The Kline `interval` is the row
-> period. The archive *package source* (`monthly` historical base / `daily`
-> recent delta) is only how Binance packages files; it is **not** a Kline
-> interval and is **not** part of the schema or primary key.
+> period. The archive package source (`monthly` historical base / `daily` recent
+> delta) is only how Binance packages files; it is **not** a Kline interval and
+> is **not** part of the primary key.
 
-### Schema (normalized row — Phase 6 materialization target)
+### Schema (Parquet logical row as DuckDB exposes it)
 
 | name | type | nullable | unit | constraints | description |
 |------|------|----------|------|-------------|-------------|
-| `symbol` | string | false | n/a | non-empty; Binance symbol | Trading symbol (e.g. `BTCUSDT`). From archive path, not a CSV column. |
+| `symbol` | string | false | n/a | non-empty; Binance symbol | Trading symbol (e.g. `BTCUSDT`). Exposed from Hive partition path. |
 | `interval` | enum | false | n/a | `1d`\|`4h`\|`1h`\|`15m`\|`5m`\|`1m` | Kline interval. From archive path, not a CSV column. |
 | `open_time` | timestamp | false | ms epoch (UTC) | `>= 0`; aligned to interval | Bar open time. Part of primary key. |
+| `open_time_utc` | timestamp | false | UTC wall-clock | derived from `open_time` | Bar open time as UTC timestamp. |
+| `open_time_taipei` | timestamp | false | Asia/Taipei wall-clock | derived from `open_time` | Bar open time in Taipei wall-clock time. |
+| `date` | string | false | Asia/Taipei date | `YYYY-MM-DD`; equals `CAST(open_time_taipei AS DATE)` | Date partition/grouping policy for research queries. |
+| `year` | string | false | Asia/Taipei year | derived from `open_time_taipei`; exposed from Hive partition path | Year partition. |
+| `month` | string | false | Asia/Taipei month | `1..12`; derived from `open_time_taipei` | Month grouping field. |
 | `open` | decimal | false | quote | `> 0` | Open price. |
 | `high` | decimal | false | quote | `>= open, close, low` | High price. |
 | `low` | decimal | false | quote | `<= open, close, high` | Low price. |
 | `close` | decimal | false | quote | `> 0` | Close price. |
 | `volume` | decimal | false | base | `>= 0` | Base-asset volume. |
-| `close_time` | timestamp | false | ms epoch (UTC) | `> open_time` | Bar close time. |
-| `quote_asset_volume` | decimal | false | quote | `>= 0` | Quote-asset volume. |
-| `count` | integer | false | n/a | `>= 0` | Number of trades. |
-| `taker_buy_volume` | decimal | false | base | `>= 0, <= volume` | Taker buy base volume. |
-| `taker_buy_quote_volume` | decimal | false | quote | `>= 0, <= quote_asset_volume` | Taker buy quote volume. |
+| `close_time` | timestamp | false | ms epoch (UTC) | `open_time + interval_ms - 1` | Bar close time. |
+| `quote_volume` | decimal | false | quote | `>= 0` | Quote-asset volume. |
+| `trade_count` | integer | false | n/a | `>= 0` | Number of trades. |
+| `taker_buy_base_volume` | decimal | false | base | `>= 0, <= volume` | Taker buy base volume. |
+| `taker_buy_quote_volume` | decimal | false | quote | `>= 0, <= quote_volume` | Taker buy quote volume. |
+| `source_archive` | string | false | path | source zip path | Raw zip archive that supplied the retained row. |
+| `archive_source` | enum | false | n/a | `monthly`\|`daily` | Binance archive package source. |
+| `archive_period` | string | false | n/a | `YYYY-MM` or `YYYY-MM-DD` | Monthly or daily archive period. |
 
-> The raw archive CSV also carries a trailing `ignore` column (always `0`); it is
-> a deprecated Binance field and is dropped from the normalized schema. Older
-> archives have no header row; newer files may include one.
+> The raw archive CSV also carries a trailing `ignore` column; it is a
+> deprecated Binance field and is dropped from the normalized schema. Older
+> archives have no header row; newer files may include one. Parsing is
+> positional because Binance header names differ from the canonical Parquet
+> names above.
 
 ### Quality Rules
 
@@ -371,25 +386,24 @@ from the Binance Data Vision public archive, parameterized by Kline interval.
 |---|------|----------|-----------|
 | K1 | Completeness | Completeness | All non-null fields present; no row dropped silently. |
 | K2 | Uniqueness | Uniqueness | `(symbol, interval, open_time)` unique across all rows. |
-| K3 | Range / domain | Range / domain | Prices `> 0`; volumes `>= 0`; `interval` in the supported set. |
-| K4 | Consistency | Consistency | `high >= max(open, close)`; `low <= min(open, close)`; `close_time > open_time`; taker volumes `<=` totals. |
-| K5 | Archive integrity | Completeness | Every downloaded archive zip matches its published `.CHECKSUM` (SHA-256). Mismatch fails loud. |
-| K6 | Referential | Referential | `symbol` is cross-checkable against `reference.universe.metadata` but is **not** constrained to the current active universe (the archive includes delisted symbols). |
-
-> **Phase 5 scope.** Phase 5 builds and verifies the raw archive inventory
-> (zip + `.CHECKSUM`) under `local_data/` and records a manifest, coverage, and
-> research-access metadata. Row-level checks K1–K4 become executable when the
-> normalized Parquet materialization lands in Phase 6. K5 (checksum) is enforced
-> now during download/verify.
+| K3 | Range / domain | Range / domain | Prices `> 0`; volumes `>= 0`; `trade_count >= 0`; `interval` in the supported set. |
+| K4 | OHLC consistency | Consistency | `high >= max(open, close)`; `low <= min(open, close)`; taker volumes `<=` totals. |
+| K5 | Time consistency | Consistency | `date` equals the Taipei date of `open_time_taipei`; `open_time` is interval-aligned; `close_time = open_time + interval_ms - 1`. |
+| K6 | Interval date policy | Consistency | For `1d`, `(symbol, date)` is unique. For `4h`, each `(symbol, date)` has at most 6 rows. |
+| K7 | Archive integrity | Completeness | Every downloaded archive zip matches its published `.CHECKSUM` (SHA-256). Mismatch fails loud. |
+| K8 | Referential | Referential | `symbol` is cross-checkable against `reference.universe.metadata` but is **not** constrained to the current active universe (the archive includes delisted symbols). |
 
 ### Provenance & Snapshot
 
-- **Provenance** (Phase 5): `code_version = v0.6.0`, `generated_by =
-  datahub.ingestion.binance_um_klines`; `params` records the interval, archive
-  sources, daily-delta policy, and `local_root`. There is **no single committed
-  content checksum**: full historical market data lives only under `local_data/`
-  (uncommitted, machine-specific); per-file SHA-256 checksums are recorded in the
-  run manifest at `local_data/binance_um_klines/interval=<INTERVAL>/manifests/`.
+- **Raw provenance:** `generated_by = datahub.ingestion.binance_um_klines`;
+  `params` records the interval, archive sources, daily-delta policy, and
+  `local_root`. Per-file SHA-256 checksums are recorded in
+  `local_data/binance_um_klines/interval=<INTERVAL>/manifests/`.
+- **Parquet provenance:** `generated_by =
+  datahub.materialization.binance_um_klines_parquet`; `params` records the
+  interval, partition layout, DuckDB query engine, output root, manifest, and
+  validation command. Full historical market data remains under `local_data/`
+  and is uncommitted / machine-specific.
 - **Snapshot policy:** snapshots are deferred until a future phase publishes an
-  immutable, content-addressable materialization (`ROOT.md` → *Snapshot
-  Principles*); Phase 5 raw archives are not a published snapshot.
+  immutable, content-addressable materialization (`ROOT.md` -> *Snapshot
+  Principles*); current raw and Parquet artifacts are local draft outputs.

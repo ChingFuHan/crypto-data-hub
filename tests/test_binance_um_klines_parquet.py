@@ -1,4 +1,4 @@
-"""Tests for the Binance UM 1D Kline Parquet materialization (Phase 6)."""
+"""Tests for the Binance UM Kline Parquet materialization."""
 
 import io
 import json
@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta
 
 from datahub.materialization import binance_um_klines_parquet as mat
 from datahub.validation.binance_um_klines_parquet import validate_parquet_manifest
@@ -21,6 +22,28 @@ HEADER = (
     "open_time,open,high,low,close,volume,close_time,quote_volume,count,"
     "taker_buy_volume,taker_buy_quote_volume,ignore"
 )
+FOUR_H_MS = 14_400_000
+
+
+def ms_utc(year, month, day, hour=0):
+    return int(
+        (datetime(year, month, day, hour) - datetime(1970, 1, 1)).total_seconds()
+        * 1000
+    )
+
+
+def six_rows_for_taipei_date_20200101():
+    # Taipei 2020-01-01 contains UTC opens:
+    # 2019-12-31 16:00/20:00 and 2020-01-01 00:00/04:00/08:00/12:00.
+    opens = [
+        ms_utc(2019, 12, 31, 16),
+        ms_utc(2019, 12, 31, 20),
+        ms_utc(2020, 1, 1, 0),
+        ms_utc(2020, 1, 1, 4),
+        ms_utc(2020, 1, 1, 8),
+        ms_utc(2020, 1, 1, 12),
+    ]
+    return [row_for_interval(ms, "4h") for ms in opens]
 
 
 def csv_bytes(rows, *, header=False):
@@ -38,8 +61,17 @@ def zip_bytes(member_name, data):
     return buf.getvalue()
 
 
-def write_archive(raw_root, source, symbol, period, rows, *, header=False):
-    name = f"{symbol}-1d-{period}"
+def row_for_interval(open_time, interval):
+    delta = mat.interval_milliseconds(interval) - 1
+    close_time = open_time + delta
+    return (
+        f"{open_time},1.0,2.0,0.5,1.5,10.0,{close_time},"
+        "15.0,3,5.0,7.5,0"
+    )
+
+
+def write_archive(raw_root, source, symbol, period, rows, *, header=False, interval="1d"):
+    name = f"{symbol}-{interval}-{period}"
     directory = Path(raw_root) / source / symbol
     directory.mkdir(parents=True, exist_ok=True)
     zip_path = directory / f"{name}.zip"
@@ -47,13 +79,13 @@ def write_archive(raw_root, source, symbol, period, rows, *, header=False):
     return zip_path
 
 
-def build_env(tmp, archive_specs, *, discovered_symbol_count=None):
+def build_env(tmp, archive_specs, *, discovered_symbol_count=None, interval="1d"):
     """Create raw layout + run manifest + files.jsonl from archive_specs.
 
     Each spec: (source, symbol, period, rows[, header]).
     Returns (manifest_path, raw_root, output_root).
     """
-    base = Path(tmp) / "local_data" / "binance_um_klines" / "interval=1d"
+    base = Path(tmp) / "local_data" / "binance_um_klines" / f"interval={interval}"
     raw_root = base / "raw"
     manifests = base / "manifests"
     manifests.mkdir(parents=True, exist_ok=True)
@@ -64,7 +96,9 @@ def build_env(tmp, archive_specs, *, discovered_symbol_count=None):
     for spec in archive_specs:
         source, symbol, period, rows = spec[0], spec[1], spec[2], spec[3]
         header = spec[4] if len(spec) > 4 else False
-        zip_path = write_archive(raw_root, source, symbol, period, rows, header=header)
+        zip_path = write_archive(
+            raw_root, source, symbol, period, rows, header=header, interval=interval
+        )
         symbols.add(symbol)
         file_records.append(
             {
@@ -86,7 +120,7 @@ def build_env(tmp, archive_specs, *, discovered_symbol_count=None):
 
     manifest_path = manifests / "manifest.json"
     manifest = {
-        "interval": "1d",
+        "interval": interval,
         "dataset_id": "market.binance.um.klines",
         "symbol_count": discovered_symbol_count or len(symbols),
         "discovered_symbol_count": discovered_symbol_count or len(symbols),
@@ -97,8 +131,9 @@ def build_env(tmp, archive_specs, *, discovered_symbol_count=None):
 
 
 def make_config(manifest_path, raw_root, output_root, **overrides):
+    interval = overrides.pop("interval", "1d")
     params = dict(
-        interval="1d",
+        interval=interval,
         raw_root=Path(raw_root),
         manifest=Path(manifest_path),
         output_root=Path(output_root),
@@ -195,6 +230,21 @@ class ParsingTest(unittest.TestCase):
         ):
             self.assertIsNotNone(getattr(rec, col), col)
 
+    def test_case07b_4h_header_and_no_header_csv(self):
+        row = row_for_interval(OPEN_TIME_20200101, "4h")
+        for header in (False, True):
+            rows = mat.parse_kline_csv(csv_bytes([row], header=header))
+            rec = mat.build_record(
+                rows[0],
+                symbol="BTCUSDT",
+                interval="4h",
+                archive_source="monthly",
+                archive_period="2020-01",
+                source_archive="x.zip",
+            )
+            self.assertEqual(rec.interval, "4h")
+            self.assertEqual(rec.close_time, OPEN_TIME_20200101 + FOUR_H_MS - 1)
+
 
 # --------------------------------------------------------------------------- #
 # Dedup / conflict / OHLC (cases 8-12)
@@ -276,6 +326,58 @@ class NormalizeTest(unittest.TestCase):
         violations = mat.find_ohlc_violations([rec])
         self.assertEqual(len(violations), 1)
 
+    def test_case12b_4h_time_rules_detect_alignment_and_close_time(self):
+        aligned = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101, "4h")]))[0],
+            symbol="BTCUSDT", interval="4h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(mat.find_time_rule_violations([aligned], interval="4h"), [])
+
+        bad_open = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101 + 1, "4h")]))[0],
+            symbol="BTCUSDT", interval="4h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        bad_close_row = (
+            f"{OPEN_TIME_20200101},1.0,2.0,0.5,1.5,10.0,"
+            f"{OPEN_TIME_20200101 + FOUR_H_MS},15.0,3,5.0,7.5,0"
+        )
+        bad_close = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([bad_close_row]))[0],
+            symbol="BTCUSDT", interval="4h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(
+            len(mat.find_time_rule_violations([bad_open, bad_close], interval="4h")),
+            2,
+        )
+
+    def test_case12c_4h_same_date_limit_allows_six_rejects_seven(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            rows = six_rows_for_taipei_date_20200101()
+            archive = write_archive(
+                raw, "monthly", "AAAUSDT", "2020-01", rows, interval="4h"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("AAAUSDT", specs, interval="4h", strict=False)
+            self.assertEqual(res.max_rows_per_date, 6)
+            self.assertEqual(res.rows_per_date_violation_count, 0)
+
+            seven = rows + [row_for_interval(ms_utc(2020, 1, 1, 13), "4h")]
+            archive = write_archive(
+                raw, "monthly", "BBBUSDT", "2020-01", seven, interval="4h"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("BBBUSDT", specs, interval="4h", strict=False)
+            self.assertEqual(res.rows_per_date_violation_count, 1)
+            with self.assertRaises(mat.StrictModeError):
+                mat.normalize_symbol("BBBUSDT", specs, interval="4h", strict=True)
+
 
 # --------------------------------------------------------------------------- #
 # End-to-end: resume / DuckDB / validation / counts (cases 13-17)
@@ -293,6 +395,20 @@ class EndToEndTest(unittest.TestCase):
                 ("monthly", "BTCUSDT", "2020-01", [ROW_20200101]),
                 ("monthly", "BTCUSDT", "2020-02", [feb_row]),
             ],
+        )
+
+    def _four_h_specs(self, tmp):
+        return build_env(
+            tmp,
+            [
+                (
+                    "monthly",
+                    "BTCUSDT",
+                    "2020-01",
+                    six_rows_for_taipei_date_20200101(),
+                )
+            ],
+            interval="4h",
         )
 
     def test_case13_resume_skips_completed_symbol(self):
@@ -372,6 +488,39 @@ class EndToEndTest(unittest.TestCase):
             self.assertEqual(
                 len(list(Path(out).rglob("*.csv"))), 0
             )
+
+    def test_case18_duckdb_reads_and_validates_4h(self):
+        import duckdb
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = self._four_h_specs(tmp)
+            manifest = mat.run(make_config(manifest_p, raw, out, interval="4h"))
+            self.assertEqual(
+                manifest["materialized_dataset_id"],
+                "market.binance.um.klines.4h.parquet",
+            )
+            self.assertEqual(manifest["interval"], "4h")
+            self.assertEqual(manifest["output_scope"], "FULL_OUTPUT")
+            self.assertEqual(manifest["symbol_count"], 1)
+            self.assertEqual(manifest["generated_csv_file_count"], 0)
+
+            glob = str(out / "**" / "*.parquet")
+            n, max_per_date = duckdb.sql(
+                f"SELECT COUNT(*), MAX(n) FROM ("
+                f"SELECT symbol, date, COUNT(*) AS n "
+                f"FROM read_parquet('{glob}', hive_partitioning=true) "
+                f"GROUP BY symbol, date)"
+            ).fetchone()
+            self.assertEqual(n, 1)
+            self.assertEqual(max_per_date, 6)
+
+            mat_manifest = out / "manifests" / "materialization_manifest.json"
+            report = validate_parquet_manifest(mat_manifest, "4h", ".")
+            self.assertFalse(report.has_failures, report.render())
+
+    def test_case19_default_paths_are_interval_aware(self):
+        self.assertIn("interval=4h", mat.default_raw_root("4h"))
+        self.assertIn("interval=4h", mat.default_manifest("4h"))
+        self.assertIn("interval=4h", mat.default_output_root("4h"))
 
     def test_full_vs_sample_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

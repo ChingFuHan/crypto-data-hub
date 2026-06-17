@@ -1,36 +1,35 @@
-# Klines Access — Raw Archive vs Parquet Query Layer
+# Klines Access — Raw Archive Vs Parquet Query Layer
 
-> How to read Binance USD-M Futures Kline data from the two storage layers.
-> Subordinate to [ROOT.md](../ROOT.md). For raw-archive enumeration details see
-> [research_agent_klines_access.md](research_agent_klines_access.md); for the
-> materialization design see
+> How to read Binance USD-M Futures Kline data from the raw and Parquet
+> storage layers. Subordinate to [ROOT.md](../ROOT.md). For raw-archive
+> enumeration details see [research_agent_klines_access.md](research_agent_klines_access.md);
+> for materialization design see
 > [binance_um_klines_parquet_materialization.md](binance_um_klines_parquet_materialization.md).
 
 ---
 
-## Two layers
+## Layers
 
 | Layer | Path | Format | How to read |
 |-------|------|--------|-------------|
-| **raw** (source) | `local_data/binance_um_klines/interval=1d/raw/` | zip (CSV inside) | unzip + positional CSV parse |
-| **parquet** (query) | `local_data/binance_um_klines/interval=1d/parquet/` | Parquet (Hive) | **DuckDB** `read_parquet(...)` |
+| raw source | `local_data/binance_um_klines/interval=<INTERVAL>/raw/` | zip (CSV inside) | unzip and positional CSV parse |
+| parquet query | `local_data/binance_um_klines/interval=<INTERVAL>/parquet/` | Parquet (Hive) | DuckDB `read_parquet(...)` |
 
-- The **raw zip archive is the immutable source layer**. CSV exists only inside
-  the zips; it is the transient parse format, never a persistent output.
-- The **query layer is Parquet** and the **standard read path is DuckDB**.
-- `local_data/` is **not** committed to Git — both layers are machine-specific.
+CSV exists only inside raw zip archives and the transient parser. Persistent CSV
+file count under the Parquet tree must remain zero.
+
+`local_data/` is machine-specific and not committed.
 
 ---
 
-## Reading the Parquet query layer (DuckDB)
+## DuckDB Read Path
 
 ```python
 import duckdb
 
-root = "local_data/binance_um_klines/interval=1d/parquet"
+root = "local_data/binance_um_klines/interval=4h/parquet"
 con = duckdb.connect()
 
-# hive_partitioning=true exposes the symbol and year partition columns.
 df = con.sql(f"""
     SELECT symbol, MIN(date) AS date_min, MAX(date) AS date_max,
            COUNT(*) AS row_count
@@ -41,63 +40,70 @@ df = con.sql(f"""
 print(df)
 ```
 
-Always pass `hive_partitioning = true` and use a recursive glob
-(`**/*.parquet`). `symbol` and `year` come from the Hive path; they are **not**
-stored as physical columns (this avoids duplicate/ambiguous columns).
+Always use:
 
-### Logical schema
+```text
+read_parquet('local_data/binance_um_klines/interval=<INTERVAL>/parquet/**/*.parquet', hive_partitioning=true)
+```
+
+`symbol` and `year` come from the Hive path; they are not stored as physical
+columns in the parquet files.
+
+---
+
+## Logical Schema
+
+DuckDB exposes:
 
 `symbol`, `interval`, `open_time`, `open_time_utc`, `open_time_taipei`, `date`,
 `year`, `month`, `open`, `high`, `low`, `close`, `volume`, `close_time`,
 `quote_volume`, `trade_count`, `taker_buy_base_volume`,
 `taker_buy_quote_volume`, `source_archive`, `archive_source`, `archive_period`.
 
-- `open_time` / `close_time` — epoch **milliseconds** (UTC).
-- `open_time_utc` / `open_time_taipei` — naive timestamps (UTC and UTC+8
-  wall-clock).
-- `date` — `YYYY-MM-DD`, the **Asia/Taipei** calendar date of the bar.
-- Primary key: `(symbol, interval, open_time)`; for 1D, `(symbol, date)` is also
-  unique.
+`open_time` and `close_time` are epoch milliseconds. `open_time_utc` and
+`open_time_taipei` are naive wall-clock timestamps. `date` is the Asia/Taipei
+calendar date of `open_time_taipei`.
 
 ---
 
-## Date / timezone policy
+## Key And Date Policy
 
-`date` is derived from `open_time_taipei` (Asia/Taipei). Because the timestamps
-are stored as naive wall-clock values, `CAST(open_time_taipei AS DATE)` equals
-`date` regardless of the DuckDB session timezone. For 1D bars (00:00 UTC =
-08:00 Taipei) the Taipei date equals the UTC date.
+Primary key:
 
----
+```text
+(symbol, interval, open_time)
+```
 
-## Duplicate / conflict policy
+Interval rules:
 
-Bars are deduplicated on `(symbol, interval, open_time)`. When `monthly` and
-`daily` archives disagree on a bar, **daily wins** and the disagreement is
-recorded in `reports/conflict_report.json`. Identical cross-archive bars are
-deduplicated and counted in `reports/duplicate_report.json`. Same-source
-inconsistencies and OHLC-rule violations are recorded in
-`reports/data_quality_report.json`.
+| Interval | Dataset ID | Date policy |
+|----------|------------|-------------|
+| `1d` | `market.binance.um.klines.1d.parquet` | `(symbol, date)` is unique. |
+| `4h` | `market.binance.um.klines.4h.parquet` | `(symbol, date)` is a grouping field with at most 6 rows. |
 
----
-
-## FULL_OUTPUT vs SAMPLE_OUTPUT
-
-`manifests/materialization_manifest.json` carries `output_scope`:
-
-- **FULL_OUTPUT** — the materialized symbol set covers the raw 1D universe
-  (≈ 921 symbols).
-- **SAMPLE_OUTPUT** — only a subset (e.g. a `BTCUSDT`/`ETHUSDT` run). Not full
-  completion.
+For `4h`, do not join or upsert by `(symbol, date)` alone.
 
 ---
 
-## Reading the raw layer (when you need the source)
+## FULL_OUTPUT Vs SAMPLE_OUTPUT
+
+The materialization manifest records `output_scope`:
+
+- `FULL_OUTPUT`: `--all`, zero failed symbols, materialized symbols equal the raw
+  interval universe.
+- `SAMPLE_OUTPUT`: selected symbols only, such as `BTCUSDT ETHUSDT`.
+
+Phase 7 completion requires the 4h Parquet manifest to be `FULL_OUTPUT` with
+the full raw 4h symbol set.
+
+---
+
+## Reading Raw Archives
 
 See [research_agent_klines_access.md](research_agent_klines_access.md). In
 short: enumerate verified zips from `manifests/files.jsonl`
-(`checksum_status in {passed, skipped_existing_verified}`), unzip, and parse the
-CSV **positionally** (newer files have a header, older files do not).
+(`checksum_status in {passed, skipped_existing_verified}`), unzip, and parse
+CSV positionally. Newer files may have a header; older files may not.
 
 ---
 
@@ -106,9 +112,9 @@ CSV **positionally** (newer files have a header, older files do not).
 ```bash
 python -m datahub.validation \
   --target binance-um-klines-parquet \
-  --interval 1d \
-  --manifest local_data/binance_um_klines/interval=1d/parquet/manifests/materialization_manifest.json
+  --interval 4h \
+  --manifest local_data/binance_um_klines/interval=4h/parquet/manifests/materialization_manifest.json
 ```
 
-`python -m datahub.validation --all` validates both layers when present and
-stays clone-safe (skips absent `local_data` layers).
+`python -m datahub.validation --all` validates local raw and Parquet layers only
+when their manifests exist, so a fresh clone remains clone-safe.

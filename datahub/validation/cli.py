@@ -9,6 +9,7 @@ import sys
 from .binance_um_klines import ALLOWED_INTERVALS, validate_klines_manifest
 from .binance_um_klines_parquet import (
     ALLOWED_INTERVALS as PARQUET_ALLOWED_INTERVALS,
+    dataset_id_for_interval as parquet_dataset_id_for_interval,
     validate_parquet_manifest,
 )
 from .errors import ValidationCommandError
@@ -120,7 +121,7 @@ def run(args: argparse.Namespace) -> ValidationReport:
                 "--all (provide --target binance-um-klines-parquet --manifest to "
                 "validate local_data)",
                 file=str(parquet_manifest),
-                dataset_id="market.binance.um.klines.1d.parquet",
+                dataset_id=parquet_dataset_id_for_interval(args.interval),
             )
         return report
 

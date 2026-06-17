@@ -1,4 +1,4 @@
-"""Validation rules for the Binance UM 1D Kline **Parquet** materialized layer.
+"""Validation rules for Binance UM Kline **Parquet** materialized layers.
 
 This validator inspects a machine-specific ``local_data`` materialization
 manifest produced by
@@ -20,8 +20,16 @@ from typing import Any
 
 from .result import ValidationReport
 
-DATASET_ID = "market.binance.um.klines.1d.parquet"
-ALLOWED_INTERVALS = ("1d",)
+RAW_DATASET_ID = "market.binance.um.klines"
+ALLOWED_INTERVALS = ("1d", "4h")
+INTERVAL_MILLISECONDS = {
+    "1d": 86_400_000,
+    "4h": 14_400_000,
+}
+ROWS_PER_SYMBOL_DATE_LIMIT = {
+    "1d": 1,
+    "4h": 6,
+}
 EXPECTED_PRIMARY_KEY = ["symbol", "interval", "open_time"]
 GITIGNORE_LOCAL_DATA = "local_data/"
 
@@ -55,11 +63,20 @@ REQUIRED_LOGICAL_COLUMNS = (
 REQUIRED_NON_NULL = REQUIRED_LOGICAL_COLUMNS  # all required logical columns non-null
 
 
+def dataset_id_for_interval(interval: str) -> str:
+    return f"{RAW_DATASET_ID}.{interval}.parquet"
+
+
+DATASET_ID = dataset_id_for_interval("1d")
+
+
 def validate_parquet_manifest(
     manifest_path: str | Path,
     interval: str,
     repo_root: str | Path = ".",
 ) -> ValidationReport:
+    global DATASET_ID
+    DATASET_ID = dataset_id_for_interval(interval)
     report = ValidationReport()
     path = Path(manifest_path)
     repo = Path(repo_root)
@@ -150,7 +167,7 @@ def validate_parquet_manifest(
     if scope == FULL_OUTPUT:
         report.passed(
             "PQ-OUTPUT-SCOPE",
-            "output_scope is FULL_OUTPUT (covers the raw 1D universe)",
+            f"output_scope is FULL_OUTPUT (covers the raw {interval} universe)",
             file=file_name, dataset_id=DATASET_ID, field="output_scope",
             details={"symbol_count": sym_n, "raw_discovered_symbol_count": raw_n,
                      "symbol_count_delta": delta},
@@ -158,7 +175,7 @@ def validate_parquet_manifest(
     elif scope == SAMPLE_OUTPUT:
         report.passed(
             "PQ-OUTPUT-SCOPE",
-            "output_scope is SAMPLE_OUTPUT (subset of the raw 1D universe; "
+            f"output_scope is SAMPLE_OUTPUT (subset of the raw {interval} universe; "
             "not full completion)",
             file=file_name, dataset_id=DATASET_ID, field="output_scope",
             severity="warning",
@@ -171,6 +188,21 @@ def validate_parquet_manifest(
             "output_scope must be FULL_OUTPUT or SAMPLE_OUTPUT",
             file=file_name, dataset_id=DATASET_ID, field="output_scope",
             details={"value": scope},
+        )
+
+    if scope == FULL_OUTPUT and raw_n == sym_n and isinstance(sym_n, int) and sym_n > 0:
+        report.passed(
+            "PQ-FULL-SYMBOL-COVERAGE",
+            "FULL_OUTPUT symbol_count equals raw_discovered_symbol_count",
+            file=file_name, dataset_id=DATASET_ID, field="symbol_count",
+            details={"symbol_count": sym_n, "raw_discovered_symbol_count": raw_n},
+        )
+    elif scope == FULL_OUTPUT:
+        report.failed(
+            "PQ-FULL-SYMBOL-COVERAGE",
+            "FULL_OUTPUT must cover every raw discovered symbol",
+            file=file_name, dataset_id=DATASET_ID, field="symbol_count",
+            details={"symbol_count": sym_n, "raw_discovered_symbol_count": raw_n},
         )
 
     # output_root exists.
@@ -239,13 +271,17 @@ def validate_parquet_manifest(
         )
 
     # DuckDB-backed checks.
-    _validate_with_duckdb(report, manifest, root_path, file_name)
+    _validate_with_duckdb(report, manifest, root_path, file_name, interval)
 
     return report
 
 
 def _validate_with_duckdb(
-    report: ValidationReport, manifest: dict[str, Any], root: Path, file_name: str
+    report: ValidationReport,
+    manifest: dict[str, Any],
+    root: Path,
+    file_name: str,
+    interval: str,
 ) -> None:
     try:
         import duckdb  # noqa: F401
@@ -334,14 +370,29 @@ def _validate_with_duckdb(
                 "(symbol, interval, open_time) is unique",
                 "(symbol, interval, open_time) has duplicates", file_name)
 
-    # (symbol, date) unique for 1D.
-    dup_date = con.sql(
-        f"SELECT COUNT(*) FROM (SELECT symbol, date FROM {src} "
-        f"GROUP BY symbol, date HAVING COUNT(*) > 1)"
+    # Per-interval (symbol, date) cardinality policy.
+    per_date_limit = ROWS_PER_SYMBOL_DATE_LIMIT[interval]
+    max_rows_per_date = con.sql(
+        f"SELECT COALESCE(MAX(n), 0) FROM ("
+        f"SELECT symbol, date, COUNT(*) AS n FROM {src} "
+        f"GROUP BY symbol, date)"
     ).fetchone()[0]
-    _zero_check(report, dup_date, "PQ-UNIQUE-DATE",
-                "(symbol, date) is unique for 1D",
-                "(symbol, date) has duplicates", file_name)
+    if max_rows_per_date <= per_date_limit:
+        report.passed(
+            "PQ-SYMBOL-DATE-LIMIT",
+            f"max rows per (symbol, date) <= {per_date_limit}",
+            file=file_name,
+            dataset_id=DATASET_ID,
+            details={"max_rows_per_symbol_date": max_rows_per_date},
+        )
+    else:
+        report.failed(
+            "PQ-SYMBOL-DATE-LIMIT",
+            f"max rows per (symbol, date) must be <= {per_date_limit}",
+            file=file_name,
+            dataset_id=DATASET_ID,
+            details={"max_rows_per_symbol_date": max_rows_per_date},
+        )
 
     # OHLC rule.
     bad_ohlc = con.sql(
@@ -367,7 +418,99 @@ def _validate_with_duckdb(
                 "date matches open_time_taipei calendar date",
                 "date does not match open_time_taipei calendar date", file_name)
 
+    interval_ms = INTERVAL_MILLISECONDS[interval]
+    bad_open_alignment = con.sql(
+        f"SELECT COUNT(*) FROM {src} WHERE open_time % {interval_ms} != 0"
+    ).fetchone()[0]
+    _zero_check(
+        report,
+        bad_open_alignment,
+        "PQ-OPEN-TIME-ALIGNMENT",
+        f"open_time is aligned to interval={interval}",
+        f"open_time is not aligned to interval={interval}",
+        file_name,
+    )
+
+    expected_delta = interval_ms - 1
+    bad_close_time = con.sql(
+        f"SELECT COUNT(*) FROM {src} "
+        f"WHERE close_time != open_time + {expected_delta}"
+    ).fetchone()[0]
+    _zero_check(
+        report,
+        bad_close_time,
+        "PQ-CLOSE-TIME-RULE",
+        "close_time equals open_time + interval_ms - 1",
+        "close_time does not equal open_time + interval_ms - 1",
+        file_name,
+    )
+
+    if interval == "4h":
+        _validate_4h_row_count_regression(report, manifest, file_name)
+
     con.close()
+
+
+def _validate_4h_row_count_regression(
+    report: ValidationReport, manifest: dict[str, Any], file_name: str
+) -> None:
+    if manifest.get("output_scope") != FULL_OUTPUT or (
+        manifest.get("raw_discovered_symbol_count") != 921
+    ):
+        report.skipped(
+            "PQ-4H-ROWS-GT-1D",
+            "4h > 1d row-count check is required only for production FULL_OUTPUT",
+            file=file_name,
+            dataset_id=DATASET_ID,
+            details={
+                "output_scope": manifest.get("output_scope"),
+                "raw_discovered_symbol_count": manifest.get(
+                    "raw_discovered_symbol_count"
+                ),
+            },
+        )
+        return
+    one_d_manifest = Path(
+        "local_data/binance_um_klines/interval=1d/parquet/"
+        "manifests/materialization_manifest.json"
+    )
+    if not one_d_manifest.exists():
+        report.skipped(
+            "PQ-4H-ROWS-GT-1D",
+            "1D materialization manifest absent; skipped 4h > 1d row-count check",
+            file=str(one_d_manifest),
+            dataset_id=DATASET_ID,
+        )
+        return
+    try:
+        one_d = json.loads(one_d_manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        report.failed(
+            "PQ-4H-ROWS-GT-1D",
+            "1D materialization manifest is not readable JSON",
+            file=str(one_d_manifest),
+            dataset_id=DATASET_ID,
+            details={"error": str(exc)},
+        )
+        return
+    row_count = manifest.get("row_count")
+    one_d_rows = one_d.get("row_count")
+    if isinstance(row_count, int) and isinstance(one_d_rows, int) and row_count > one_d_rows:
+        report.passed(
+            "PQ-4H-ROWS-GT-1D",
+            "4h row_count is greater than 1D row_count",
+            file=file_name,
+            dataset_id=DATASET_ID,
+            details={"row_count_4h": row_count, "row_count_1d": one_d_rows},
+        )
+    else:
+        report.failed(
+            "PQ-4H-ROWS-GT-1D",
+            "4h row_count must be greater than 1D row_count",
+            file=file_name,
+            dataset_id=DATASET_ID,
+            details={"row_count_4h": row_count, "row_count_1d": one_d_rows},
+        )
 
 
 def _zero_check(
