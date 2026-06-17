@@ -21,14 +21,16 @@ from typing import Any
 from .result import ValidationReport
 
 RAW_DATASET_ID = "market.binance.um.klines"
-ALLOWED_INTERVALS = ("1d", "4h")
+ALLOWED_INTERVALS = ("1d", "4h", "1h")
 INTERVAL_MILLISECONDS = {
     "1d": 86_400_000,
     "4h": 14_400_000,
+    "1h": 3_600_000,
 }
 ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1d": 1,
     "4h": 6,
+    "1h": 24,
 }
 EXPECTED_PRIMARY_KEY = ["symbol", "interval", "open_time"]
 GITIGNORE_LOCAL_DATA = "local_data/"
@@ -446,20 +448,53 @@ def _validate_with_duckdb(
     )
 
     if interval == "4h":
-        _validate_4h_row_count_regression(report, manifest, file_name)
+        _validate_row_count_regression(
+            report,
+            manifest,
+            file_name,
+            rule_id="PQ-4H-ROWS-GT-1D",
+            this_interval="4h",
+            base_interval="1d",
+        )
+    elif interval == "1h":
+        _validate_row_count_regression(
+            report,
+            manifest,
+            file_name,
+            rule_id="PQ-1H-ROWS-GT-4H",
+            this_interval="1h",
+            base_interval="4h",
+            min_ratio=3.5,
+        )
 
     con.close()
 
 
-def _validate_4h_row_count_regression(
-    report: ValidationReport, manifest: dict[str, Any], file_name: str
+def _validate_row_count_regression(
+    report: ValidationReport,
+    manifest: dict[str, Any],
+    file_name: str,
+    *,
+    rule_id: str,
+    this_interval: str,
+    base_interval: str,
+    min_ratio: float | None = None,
 ) -> None:
+    """Assert this interval's FULL_OUTPUT row_count dominates a coarser interval.
+
+    A finer interval has more bars per day, so its production row_count must be
+    strictly greater than the coarser baseline. When ``min_ratio`` is given the
+    ratio (this / base) must also clear that floor (e.g. 1h vs 4h >= 3.5).
+    The check runs only for production FULL_OUTPUT (raw universe = 921); it is
+    skipped for sample fixtures and when the baseline manifest is absent.
+    """
     if manifest.get("output_scope") != FULL_OUTPUT or (
         manifest.get("raw_discovered_symbol_count") != 921
     ):
         report.skipped(
-            "PQ-4H-ROWS-GT-1D",
-            "4h > 1d row-count check is required only for production FULL_OUTPUT",
+            rule_id,
+            f"{this_interval} > {base_interval} row-count check is required only "
+            "for production FULL_OUTPUT",
             file=file_name,
             dataset_id=DATASET_ID,
             details={
@@ -470,47 +505,64 @@ def _validate_4h_row_count_regression(
             },
         )
         return
-    one_d_manifest = Path(
-        "local_data/binance_um_klines/interval=1d/parquet/"
+    base_manifest = Path(
+        f"local_data/binance_um_klines/interval={base_interval}/parquet/"
         "manifests/materialization_manifest.json"
     )
-    if not one_d_manifest.exists():
+    if not base_manifest.exists():
         report.skipped(
-            "PQ-4H-ROWS-GT-1D",
-            "1D materialization manifest absent; skipped 4h > 1d row-count check",
-            file=str(one_d_manifest),
+            rule_id,
+            f"{base_interval} materialization manifest absent; skipped "
+            f"{this_interval} > {base_interval} row-count check",
+            file=str(base_manifest),
             dataset_id=DATASET_ID,
         )
         return
     try:
-        one_d = json.loads(one_d_manifest.read_text(encoding="utf-8"))
+        base = json.loads(base_manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         report.failed(
-            "PQ-4H-ROWS-GT-1D",
-            "1D materialization manifest is not readable JSON",
-            file=str(one_d_manifest),
+            rule_id,
+            f"{base_interval} materialization manifest is not readable JSON",
+            file=str(base_manifest),
             dataset_id=DATASET_ID,
             details={"error": str(exc)},
         )
         return
     row_count = manifest.get("row_count")
-    one_d_rows = one_d.get("row_count")
-    if isinstance(row_count, int) and isinstance(one_d_rows, int) and row_count > one_d_rows:
-        report.passed(
-            "PQ-4H-ROWS-GT-1D",
-            "4h row_count is greater than 1D row_count",
-            file=file_name,
-            dataset_id=DATASET_ID,
-            details={"row_count_4h": row_count, "row_count_1d": one_d_rows},
-        )
-    else:
+    base_rows = base.get("row_count")
+    if not (isinstance(row_count, int) and isinstance(base_rows, int) and base_rows > 0):
         report.failed(
-            "PQ-4H-ROWS-GT-1D",
-            "4h row_count must be greater than 1D row_count",
+            rule_id,
+            f"{this_interval} and {base_interval} row_count must be positive integers",
             file=file_name,
             dataset_id=DATASET_ID,
-            details={"row_count_4h": row_count, "row_count_1d": one_d_rows},
+            details={
+                f"row_count_{this_interval}": row_count,
+                f"row_count_{base_interval}": base_rows,
+            },
         )
+        return
+    ratio = row_count / base_rows
+    details = {
+        f"row_count_{this_interval}": row_count,
+        f"row_count_{base_interval}": base_rows,
+        "ratio": ratio,
+    }
+    greater_ok = row_count > base_rows
+    ratio_ok = min_ratio is None or ratio >= min_ratio
+    if greater_ok and ratio_ok:
+        msg = f"{this_interval} row_count is greater than {base_interval} row_count"
+        if min_ratio is not None:
+            msg += f" (ratio {ratio:.3f} >= {min_ratio})"
+        report.passed(rule_id, msg, file=file_name, dataset_id=DATASET_ID,
+                      details=details)
+    else:
+        msg = f"{this_interval} row_count must be greater than {base_interval} row_count"
+        if min_ratio is not None:
+            msg += f" with ratio >= {min_ratio}"
+        report.failed(rule_id, msg, file=file_name, dataset_id=DATASET_ID,
+                      details=details)
 
 
 def _zero_check(

@@ -367,6 +367,61 @@
             "tags": ["market", "binance", "usd_m_futures", "klines", "ohlcv", "parquet", "duckdb", "materialized"],
             "created_at": "2026-06-18T00:00:00Z",
             "updated_at": "2026-06-18T00:00:00Z"
+        },
+        {
+            "dataset_id": "market.binance.um.klines.1h.parquet",
+            "dataset_name": "Binance USD-M Futures Klines 1H (Parquet)",
+            "description": "DuckDB-queryable Hive-partitioned Parquet materialization of the Binance USD-M Futures 1H Kline raw archive.",
+            "version": "v0.1.0",
+            "status": "draft",
+            "owner": "data-platform",
+            "source": {
+                "type": "derived",
+                "reference": "market.binance.um.klines (Parquet materialization of the raw 1H zip archive)"
+            },
+            "timezone": "UTC",
+            "update_frequency": "daily",
+            "earliest_timestamp": "2019-12-31T00:00:00Z",
+            "latest_timestamp": "2026-06-16T00:00:00Z",
+            "schema_ref": "DATA_CONTRACT.md#contract-binance-usd-m-futures-klines",
+            "primary_key": ["symbol", "interval", "open_time"],
+            "lineage": {
+                "upstream": ["market.binance.um.klines"],
+                "transformation": "Parse verified raw 1H zip archives (positional CSV), normalize to a fixed schema, dedup on (symbol, interval, open_time) with daily-wins conflict policy, derive Asia/Taipei date, and write Hive-partitioned Parquet (symbol/year). symbol and year are exposed via Hive partitioning, not physical columns. CSV is transient; no persistent CSV is produced."
+            },
+            "provenance": {
+                "code_version": "v0.9.0",
+                "params": {
+                    "phase": "Phase 8 Binance UM 1H Kline Parquet Materialization",
+                    "interval": "1h",
+                    "output_format": "parquet",
+                    "query_engine": "duckdb",
+                    "partition_layout": "symbol=<SYMBOL>/year=<YEAR>/part-000.parquet (Hive-style)",
+                    "partition_columns_policy": "symbol and year exposed via DuckDB hive_partitioning=true; omitted from physical parquet to avoid duplicate columns",
+                    "date_policy": "date derived from open_time_taipei (Asia/Taipei) calendar date; open_time_utc and open_time_taipei stored as naive timestamps",
+                    "time_policy": "open_time % 3600000 == 0; close_time = open_time + 3599999",
+                    "key_policy": "unique key=(symbol, interval, open_time); (symbol, date) is a grouping column with at most 24 rows per day, not a unique key",
+                    "dedup_policy": "key=(symbol, interval, open_time); daily wins over monthly on conflict; identical bars deduplicated",
+                    "output_root": "local_data/binance_um_klines/interval=1h/parquet",
+                    "manifest": "local_data/binance_um_klines/interval=1h/parquet/manifests/materialization_manifest.json",
+                    "validation_command": "python -m datahub.validation --target binance-um-klines-parquet --interval 1h --manifest local_data/binance_um_klines/interval=1h/parquet/manifests/materialization_manifest.json",
+                    "generated_csv_file_count": 0,
+                    "known_coverage_gaps": [
+                        "Materialized Parquet is not committed; it exists only under local_data/ on the machine that ran the pipeline.",
+                        "PostgreSQL serving layer, live API updater, and strategy/research workspace are deferred to later phases."
+                    ]
+                },
+                "generated_by": "datahub.materialization.binance_um_klines_parquet",
+                "checksum": ""
+            },
+            "snapshot": null,
+            "quality": {
+                "contract_validated": false,
+                "last_validated_at": null
+            },
+            "tags": ["market", "binance", "usd_m_futures", "klines", "ohlcv", "parquet", "duckdb", "materialized"],
+            "created_at": "2026-06-18T00:00:00Z",
+            "updated_at": "2026-06-18T00:00:00Z"
         }
     ]
 }

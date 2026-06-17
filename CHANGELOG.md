@@ -7,6 +7,42 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.9.0] — 2026-06-18
+
+### Added — Phase 8: Binance UM 1H Kline Parquet Materialization
+
+- **Interval-aware materializer** — `binance_um_klines_parquet.py` extended to
+  `--interval {1d,4h,1h}`. Adds the `1h` interval to `ALLOWED_INTERVALS`,
+  `INTERVAL_MILLISECONDS` (`3_600_000`), and `ROWS_PER_SYMBOL_DATE_LIMIT` (`24`).
+  1D and 4H behaviour is preserved (regression-tested).
+- **1H time policy** — `open_time % 3_600_000 == 0` and
+  `close_time = open_time + 3_599_999`, enforced at materialization
+  (`find_time_rule_violations`, `--strict` fails) and re-checked in validation
+  (`PQ-OPEN-TIME-ALIGNMENT`, `PQ-CLOSE-TIME-RULE`).
+- **1H key policy** — unique key stays `(symbol, interval, open_time)`; `(symbol,
+  date)` is a grouping column with **≤ 24 rows/day** (`PQ-SYMBOL-DATE-LIMIT`).
+- **Corrupt-bar quarantine** — bars failing the OHLC or time rules are now
+  excluded from the materialized Parquet query layer and disclosed in
+  `data_quality_report.json` (`quarantined_bar_count`), keeping the DuckDB layer
+  clean; `--strict` still fails the symbol. One corrupt 1h source bar
+  (`BTCUSDT_210326`, 2021-02-03, open/close above high) is quarantined. 1d/4h
+  contain no such bars, so it is a no-op for them.
+- **1H Parquet dataset** at
+  `local_data/binance_um_klines/interval=1h/parquet/` — `FULL_OUTPUT`,
+  `symbol_count = 921`, `failed_symbol_count = 0`, `generated_csv_file_count = 0`,
+  same Hive layout (`symbol=<S>/year=<Y>/part-000.parquet`).
+- **Validation** — `binance-um-klines-parquet --interval 1h`; generalizes the
+  cross-interval row-count regression into `_validate_row_count_regression` and
+  adds `PQ-1H-ROWS-GT-4H` (1h row_count must exceed 4h, ratio `>= 3.5`), gated to
+  production FULL_OUTPUT and skipped for fixtures.
+- **Dataset registration** — `market.binance.um.klines.1h.parquet` registered as
+  `draft` with a `DATA_CATALOG.md` entry (registered dataset count → 5).
+- **Tests** — header/header-less 1H CSV, 1h alignment + close-time, ≤24 rows/day
+  legal, >24 rows/day detected, DuckDB read + explicit 1h validation, and 1D/4H
+  regression, and corrupt-bar quarantine. `87` tests pass.
+
+---
+
 ## [v0.8.0] — 2026-06-18
 
 ### Added — Phase 7: Binance UM 4H Kline Parquet Materialization

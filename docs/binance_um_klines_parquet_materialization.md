@@ -1,4 +1,4 @@
-# Binance UM Kline Parquet Materialization (Phase 7)
+# Binance UM Kline Parquet Materialization (Phases 6–8)
 
 > How the immutable raw zip archive produced by
 > `datahub.ingestion.binance_um_klines` is materialized into
@@ -28,13 +28,15 @@ The materializer currently supports:
 
 - `1d` from Phase 6.
 - `4h` from Phase 7.
+- `1h` from Phase 8.
 
-Other raw intervals (`1h`, `15m`, `5m`, `1m`) remain future materialization work.
+Other raw intervals (`15m`, `5m`, `1m`) remain future materialization work.
 
 Materialized dataset IDs:
 
 - `market.binance.um.klines.1d.parquet`
 - `market.binance.um.klines.4h.parquet`
+- `market.binance.um.klines.1h.parquet`
 
 ---
 
@@ -43,16 +45,16 @@ Materialized dataset IDs:
 ```bash
 # Sample output
 python -m datahub.materialization.binance_um_klines_parquet \
-  --interval 4h --symbols BTCUSDT ETHUSDT --workers 2 --overwrite
+  --interval 1h --symbols BTCUSDT ETHUSDT --workers 2 --overwrite
 
 # Full output
 python -m datahub.materialization.binance_um_klines_parquet \
-  --interval 4h --all --workers 4 --resume
+  --interval 1h --all --workers 4 --resume
 ```
 
 | Flag | Meaning |
 |------|---------|
-| `--interval 1d|4h` | Materialized interval. Defaults to `1d`. |
+| `--interval 1d|4h|1h` | Materialized interval. Defaults to `1d`. |
 | `--all` | Materialize every verified symbol in the raw manifest. |
 | `--symbols S1 S2` | Materialize only selected symbols (`SAMPLE_OUTPUT`). |
 | `--raw-root` | Raw archive root. Default is `local_data/.../interval=<INTERVAL>/raw`. |
@@ -126,8 +128,9 @@ Interval-specific rules:
 |----------|-----------|------------------------|
 | `1d` | `open_time % 86400000 == 0`; `close_time = open_time + 86399999` | Unique. |
 | `4h` | `open_time % 14400000 == 0`; `close_time = open_time + 14399999` | At most 6 rows. |
+| `1h` | `open_time % 3600000 == 0`; `close_time = open_time + 3599999` | At most 24 rows. |
 
-`(symbol, date)` is a grouping field for `4h`, not a unique key.
+`(symbol, date)` is a grouping field for `4h` and `1h`, not a unique key.
 
 ---
 
@@ -176,8 +179,8 @@ the raw interval universe. `SAMPLE_OUTPUT` means a subset, such as
 ```bash
 python -m datahub.validation \
   --target binance-um-klines-parquet \
-  --interval 4h \
-  --manifest local_data/binance_um_klines/interval=4h/parquet/manifests/materialization_manifest.json
+  --interval 1h \
+  --manifest local_data/binance_um_klines/interval=1h/parquet/manifests/materialization_manifest.json
 ```
 
 Checks include manifest fixed fields, output root, reports, no `.csv` files,
@@ -185,6 +188,15 @@ actual parquet file count, DuckDB readability, logical schema, required
 non-null fields, `(symbol, interval, open_time)` uniqueness, per-interval
 `(symbol, date)` row limit, OHLC rules, date policy, open-time alignment,
 close-time delta, and manifest row/file counts matching actual output.
+
+For production `FULL_OUTPUT` runs the validator also enforces a cross-interval
+row-count regression against the coarser interval's manifest:
+
+- `4h` row_count must exceed `1d` row_count.
+- `1h` row_count must exceed `4h` row_count, and `1h / 4h >= 3.5`.
+
+These regression checks are skipped for sample fixtures and when the baseline
+interval manifest is absent.
 
 `python -m datahub.validation --all` remains clone-safe: raw and Parquet
 `local_data` layers are validated only when their manifests are present.
@@ -213,6 +225,6 @@ print(df)
 ## Future Phases
 
 PostgreSQL serving, live API updates, strategy / trading layers, and research
-workspace integration are outside Phase 7.
+workspace integration are outside Phase 8.
 
 Dependencies: `duckdb` for validation/querying and `pyarrow` for writing.

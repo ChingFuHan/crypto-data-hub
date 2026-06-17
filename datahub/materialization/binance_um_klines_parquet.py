@@ -33,6 +33,15 @@ Dedup / conflict policy (key = symbol + interval + open_time)
 * same source duplicated and inconsistent      -> keep daily-preferred/first,
                                                   record data-quality issue
 ``--strict`` turns any conflict or data-quality issue into a symbol failure.
+
+Quarantine policy
+-----------------
+Bars that fail the OHLC ordering/non-negativity rules or the interval time rules
+(open-time alignment, close-time delta) are corrupt at the source. They are
+**quarantined** — excluded from the materialized Parquet query layer and
+disclosed in ``reports/data_quality_report.json`` — so the DuckDB query layer is
+guaranteed clean. ``--strict`` fails the symbol instead of quarantining. Coarser
+intervals (1d/4h) contain no such bars, so quarantine is a no-op for them.
 """
 
 from __future__ import annotations
@@ -65,18 +74,20 @@ else:
 # --------------------------------------------------------------------------- #
 
 RAW_DATASET_ID = "market.binance.um.klines"
-CODE_VERSION = "v0.8.0"
+CODE_VERSION = "v0.9.0"
 QUERY_ENGINE = "duckdb"
 OUTPUT_FORMAT = "parquet"
 
-ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h")
+ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h", "1h")
 INTERVAL_MILLISECONDS = {
     "1d": 86_400_000,
     "4h": 14_400_000,
+    "1h": 3_600_000,
 }
 ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1d": 1,
     "4h": 6,
+    "1h": 24,
 }
 PRIMARY_KEY: tuple[str, ...] = ("symbol", "interval", "open_time")
 
@@ -547,20 +558,23 @@ def _record_sample(bucket: list[dict], cap: int, item: dict) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def is_ohlc_valid(r: KlineRecord) -> bool:
+    return (
+        r.high >= r.low
+        and r.high >= r.open
+        and r.high >= r.close
+        and r.low <= r.open
+        and r.low <= r.close
+        and r.volume >= 0
+        and r.quote_volume >= 0
+        and r.trade_count >= 0
+    )
+
+
 def find_ohlc_violations(rows: Iterable[KlineRecord]) -> list[dict]:
     bad: list[dict] = []
     for r in rows:
-        ok = (
-            r.high >= r.low
-            and r.high >= r.open
-            and r.high >= r.close
-            and r.low <= r.open
-            and r.low <= r.close
-            and r.volume >= 0
-            and r.quote_volume >= 0
-            and r.trade_count >= 0
-        )
-        if not ok:
+        if not is_ohlc_valid(r):
             bad.append(
                 {
                     "symbol": r.symbol,
@@ -755,8 +769,17 @@ def write_symbol_parquet(
         shutil.rmtree(part_dir)
 
     rows = result.rows
+    # Detect corrupt bars on the full input (for disclosure counts), then
+    # quarantine them OUT of the materialized query layer so the Parquet/DuckDB
+    # layer is guaranteed clean. Strict mode still fails on any such bar; the
+    # data-quality report discloses every quarantined bar. Coarser intervals
+    # (1d/4h) contain none, so this is a no-op for them.
     ohlc_bad = find_ohlc_violations(rows)
     time_bad = find_time_rule_violations(rows, interval=interval)
+    drop_keys = {(d["symbol"], d["open_time"]) for d in ohlc_bad}
+    drop_keys |= {(d["symbol"], d["open_time"]) for d in time_bad}
+    if drop_keys:
+        rows = [r for r in rows if (r.symbol, r.open_time) not in drop_keys]
     by_year: dict[int, list[KlineRecord]] = {}
     for rec in rows:
         by_year.setdefault(rec.year, []).append(rec)
@@ -1212,6 +1235,13 @@ def _write_reports(
         "rows_per_date_violation_count": rows_per_date_violation_count,
         "ohlc_violation_count": ohlc_violation_count,
         "time_rule_violation_count": time_rule_violation_count,
+        "quarantine_policy": (
+            "OHLC-invalid and time-rule-invalid bars are excluded from the "
+            "materialized Parquet query layer and disclosed here; the counts "
+            "above are the number of bars quarantined. --strict fails the symbol "
+            "instead of quarantining."
+        ),
+        "quarantined_bar_count": ohlc_violation_count + time_rule_violation_count,
         "failed_symbol_count": manifest["failed_symbol_count"],
         "failed_symbols": [
             {"symbol": r.symbol, "error": r.error}

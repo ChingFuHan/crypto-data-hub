@@ -46,6 +46,18 @@ def six_rows_for_taipei_date_20200101():
     return [row_for_interval(ms, "4h") for ms in opens]
 
 
+ONE_H_MS = 3_600_000
+
+
+def twentyfour_rows_for_taipei_date_20200101():
+    # Taipei 2020-01-01 spans UTC 2019-12-31 16:00 .. 2020-01-01 15:00, i.e. the
+    # 24 hour-aligned opens 00:00..23:00 Taipei. This is the legal daily maximum
+    # for the 1h interval.
+    base = ms_utc(2019, 12, 31, 16)
+    opens = [base + h * ONE_H_MS for h in range(24)]
+    return [row_for_interval(ms, "1h") for ms in opens]
+
+
 def csv_bytes(rows, *, header=False):
     lines = []
     if header:
@@ -245,6 +257,21 @@ class ParsingTest(unittest.TestCase):
             self.assertEqual(rec.interval, "4h")
             self.assertEqual(rec.close_time, OPEN_TIME_20200101 + FOUR_H_MS - 1)
 
+    def test_case07c_1h_header_and_no_header_csv(self):
+        row = row_for_interval(OPEN_TIME_20200101, "1h")
+        for header in (False, True):
+            rows = mat.parse_kline_csv(csv_bytes([row], header=header))
+            rec = mat.build_record(
+                rows[0],
+                symbol="BTCUSDT",
+                interval="1h",
+                archive_source="monthly",
+                archive_period="2020-01",
+                source_archive="x.zip",
+            )
+            self.assertEqual(rec.interval, "1h")
+            self.assertEqual(rec.close_time, OPEN_TIME_20200101 + ONE_H_MS - 1)
+
 
 # --------------------------------------------------------------------------- #
 # Dedup / conflict / OHLC (cases 8-12)
@@ -378,6 +405,62 @@ class NormalizeTest(unittest.TestCase):
             with self.assertRaises(mat.StrictModeError):
                 mat.normalize_symbol("BBBUSDT", specs, interval="4h", strict=True)
 
+    def test_case12d_1h_time_rules_detect_alignment_and_close_time(self):
+        aligned = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101, "1h")]))[0],
+            symbol="BTCUSDT", interval="1h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(mat.find_time_rule_violations([aligned], interval="1h"), [])
+
+        bad_open = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101 + 1, "1h")]))[0],
+            symbol="BTCUSDT", interval="1h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        bad_close_row = (
+            f"{OPEN_TIME_20200101},1.0,2.0,0.5,1.5,10.0,"
+            f"{OPEN_TIME_20200101 + ONE_H_MS},15.0,3,5.0,7.5,0"
+        )
+        bad_close = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([bad_close_row]))[0],
+            symbol="BTCUSDT", interval="1h",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(
+            len(mat.find_time_rule_violations([bad_open, bad_close], interval="1h")),
+            2,
+        )
+
+    def test_case12e_1h_same_date_limit_allows_24_rejects_25(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            rows = twentyfour_rows_for_taipei_date_20200101()
+            archive = write_archive(
+                raw, "monthly", "AAAUSDT", "2020-01", rows, interval="1h"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("AAAUSDT", specs, interval="1h", strict=False)
+            self.assertEqual(res.max_rows_per_date, 24)
+            self.assertEqual(res.rows_per_date_violation_count, 0)
+
+            # A 25th distinct open_time still on Taipei 2020-01-01 (16:30 UTC ->
+            # 00:30 Taipei) is one over the daily limit.
+            extra = row_for_interval(ms_utc(2019, 12, 31, 16) + 1_800_000, "1h")
+            twentyfive = rows + [extra]
+            archive = write_archive(
+                raw, "monthly", "BBBUSDT", "2020-01", twentyfive, interval="1h"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("BBBUSDT", specs, interval="1h", strict=False)
+            self.assertEqual(res.max_rows_per_date, 25)
+            self.assertEqual(res.rows_per_date_violation_count, 1)
+            with self.assertRaises(mat.StrictModeError):
+                mat.normalize_symbol("BBBUSDT", specs, interval="1h", strict=True)
+
 
 # --------------------------------------------------------------------------- #
 # End-to-end: resume / DuckDB / validation / counts (cases 13-17)
@@ -409,6 +492,20 @@ class EndToEndTest(unittest.TestCase):
                 )
             ],
             interval="4h",
+        )
+
+    def _one_h_specs(self, tmp):
+        return build_env(
+            tmp,
+            [
+                (
+                    "monthly",
+                    "BTCUSDT",
+                    "2020-01",
+                    twentyfour_rows_for_taipei_date_20200101(),
+                )
+            ],
+            interval="1h",
         )
 
     def test_case13_resume_skips_completed_symbol(self):
@@ -517,10 +614,97 @@ class EndToEndTest(unittest.TestCase):
             report = validate_parquet_manifest(mat_manifest, "4h", ".")
             self.assertFalse(report.has_failures, report.render())
 
+    def test_case18b_duckdb_reads_and_validates_1h(self):
+        import duckdb
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = self._one_h_specs(tmp)
+            manifest = mat.run(make_config(manifest_p, raw, out, interval="1h"))
+            self.assertEqual(
+                manifest["materialized_dataset_id"],
+                "market.binance.um.klines.1h.parquet",
+            )
+            self.assertEqual(manifest["interval"], "1h")
+            self.assertEqual(manifest["output_scope"], "FULL_OUTPUT")
+            self.assertEqual(manifest["symbol_count"], 1)
+            self.assertEqual(manifest["row_count"], 24)
+            self.assertEqual(manifest["generated_csv_file_count"], 0)
+
+            glob = str(out / "**" / "*.parquet")
+            n, max_per_date = duckdb.sql(
+                f"SELECT COUNT(*), MAX(n) FROM ("
+                f"SELECT symbol, date, COUNT(*) AS n "
+                f"FROM read_parquet('{glob}', hive_partitioning=true) "
+                f"GROUP BY symbol, date)"
+            ).fetchone()
+            self.assertEqual(n, 1)
+            self.assertEqual(max_per_date, 24)
+
+            # open_time alignment + close_time rule hold for every 1h bar.
+            bad = duckdb.sql(
+                f"SELECT COUNT(*) FROM read_parquet('{glob}', "
+                f"hive_partitioning=true) "
+                f"WHERE open_time % {ONE_H_MS} != 0 "
+                f"OR close_time != open_time + {ONE_H_MS - 1}"
+            ).fetchone()[0]
+            self.assertEqual(bad, 0)
+
+            mat_manifest = out / "manifests" / "materialization_manifest.json"
+            report = validate_parquet_manifest(mat_manifest, "1h", ".")
+            self.assertFalse(report.has_failures, report.render())
+
+    def test_case18c_invalid_ohlc_bar_quarantined_from_output(self):
+        import duckdb
+        good = row_for_interval(OPEN_TIME_20200101, "1h")
+        bad_open = OPEN_TIME_20200101 + ONE_H_MS
+        # Corrupt source bar: open(36054) and close(39550) above high(35999).
+        bad = (
+            f"{bad_open},36054.1,35999.4,35900.0,39550.0,4.0,"
+            f"{bad_open + ONE_H_MS - 1},1.0,3,1.0,1.0,0"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = build_env(
+                tmp, [("monthly", "BTCUSDT", "2020-01", [good, bad])], interval="1h"
+            )
+            manifest = mat.run(make_config(manifest_p, raw, out, interval="1h"))
+            # Bad bar is quarantined out of the query layer.
+            self.assertEqual(manifest["row_count"], 1)
+            self.assertEqual(manifest["failed_symbol_count"], 0)
+            glob = str(out / "**" / "*.parquet")
+            remaining_bad = duckdb.sql(
+                f"SELECT COUNT(*) FROM read_parquet('{glob}', "
+                f"hive_partitioning=true) "
+                f"WHERE NOT (high>=open AND high>=close AND high>=low "
+                f"AND low<=open AND low<=close)"
+            ).fetchone()[0]
+            self.assertEqual(remaining_bad, 0)
+            # Report discloses the quarantined bar.
+            dq = json.loads(
+                (out / "reports" / "data_quality_report.json").read_text()
+            )
+            self.assertEqual(dq["ohlc_violation_count"], 1)
+            self.assertEqual(dq["quarantined_bar_count"], 1)
+            # Explicit validation passes on the cleaned layer.
+            mat_manifest = out / "manifests" / "materialization_manifest.json"
+            report = validate_parquet_manifest(mat_manifest, "1h", ".")
+            self.assertFalse(report.has_failures, report.render())
+
+        # --strict fails the symbol instead of quarantining.
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = build_env(
+                tmp, [("monthly", "BTCUSDT", "2020-01", [good, bad])], interval="1h"
+            )
+            manifest = mat.run(
+                make_config(manifest_p, raw, out, interval="1h", strict=True)
+            )
+            self.assertEqual(manifest["failed_symbol_count"], 1)
+
     def test_case19_default_paths_are_interval_aware(self):
         self.assertIn("interval=4h", mat.default_raw_root("4h"))
         self.assertIn("interval=4h", mat.default_manifest("4h"))
         self.assertIn("interval=4h", mat.default_output_root("4h"))
+        self.assertIn("interval=1h", mat.default_raw_root("1h"))
+        self.assertIn("interval=1h", mat.default_manifest("1h"))
+        self.assertIn("interval=1h", mat.default_output_root("1h"))
 
     def test_full_vs_sample_scope(self):
         with tempfile.TemporaryDirectory() as tmp:
