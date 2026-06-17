@@ -7,6 +7,10 @@ from pathlib import Path
 import sys
 
 from .binance_um_klines import ALLOWED_INTERVALS, validate_klines_manifest
+from .binance_um_klines_parquet import (
+    ALLOWED_INTERVALS as PARQUET_ALLOWED_INTERVALS,
+    validate_parquet_manifest,
+)
 from .errors import ValidationCommandError
 from .lifecycle import validate_lifecycle
 from .registry import validate_registry_file
@@ -25,6 +29,13 @@ def default_klines_manifest(interval: str) -> str:
     return f"local_data/binance_um_klines/interval={interval}/manifests/manifest.json"
 
 
+def default_parquet_manifest(interval: str) -> str:
+    return (
+        f"local_data/binance_um_klines/interval={interval}/parquet/"
+        "manifests/materialization_manifest.json"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m datahub.validation",
@@ -32,7 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--target",
-        choices=("registry", "universe-metadata", "binance-um-klines"),
+        choices=(
+            "registry",
+            "universe-metadata",
+            "binance-um-klines",
+            "binance-um-klines-parquet",
+        ),
         default="registry",
         help="validation target (default: registry)",
     )
@@ -91,6 +107,21 @@ def run(args: argparse.Namespace) -> ValidationReport:
                 file=str(klines_manifest),
                 dataset_id="market.binance.um.klines",
             )
+        # Clone-safe: only validate the parquet materialized layer if present.
+        parquet_manifest = Path(default_parquet_manifest(args.interval))
+        if parquet_manifest.exists():
+            report.extend(
+                validate_parquet_manifest(parquet_manifest, args.interval, ".")
+            )
+        else:
+            report.skipped(
+                "PQ-MANIFEST-EXISTS",
+                "parquet materialization manifest absent; skipped for clone-safe "
+                "--all (provide --target binance-um-klines-parquet --manifest to "
+                "validate local_data)",
+                file=str(parquet_manifest),
+                dataset_id="market.binance.um.klines.1d.parquet",
+            )
         return report
 
     if args.target == "registry":
@@ -118,6 +149,19 @@ def run(args: argparse.Namespace) -> ValidationReport:
                 "(large local_data validation is explicit, never clone-safe default)"
             )
         return validate_klines_manifest(args.manifest, args.interval, ".")
+
+    if args.target == "binance-um-klines-parquet":
+        if args.interval not in PARQUET_ALLOWED_INTERVALS:
+            raise ValidationCommandError(
+                "--target binance-um-klines-parquet supports only "
+                f"interval(s): {' '.join(PARQUET_ALLOWED_INTERVALS)}"
+            )
+        if not args.manifest:
+            raise ValidationCommandError(
+                "--target binance-um-klines-parquet requires --manifest "
+                "(large local_data validation is explicit, never clone-safe default)"
+            )
+        return validate_parquet_manifest(args.manifest, args.interval, ".")
 
     raise ValidationCommandError(f"unknown target: {args.target}")
 

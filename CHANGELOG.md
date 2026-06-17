@@ -7,6 +7,48 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.7.0] — 2026-06-17
+
+### Added — Phase 6: Binance UM 1D Kline Parquet Materialization
+
+- **Materialization pipeline** at
+  `datahub/materialization/binance_um_klines_parquet.py` that transforms the
+  immutable raw 1D zip archive into a DuckDB-queryable, Hive-partitioned Parquet
+  dataset. CLI:
+  `python -m datahub.materialization.binance_um_klines_parquet --interval 1d --all`
+  with `--symbols`, `--resume`, `--overwrite`, `--workers`, `--strict`.
+- **Layer model** — raw zip = immutable source; Parquet = query/materialized
+  layer; DuckDB = standard query engine. CSV is transient (inside zips only); no
+  persistent CSV is written (`generated_csv_file_count = 0`).
+- **Positional CSV parsing** (header and header-less archives), fixed normalized
+  schema, `trade_count` nullable integer, `ignore` column dropped.
+- **Date policy** — `date` derived from the Asia/Taipei calendar date;
+  `open_time_utc` / `open_time_taipei` stored as naive timestamps so
+  `CAST(open_time_taipei AS DATE)` is session-timezone-independent.
+- **Partition layout** — `symbol=<S>/year=<Y>/part-000.parquet`; `symbol` and
+  `year` exposed via `hive_partitioning = true` and omitted from physical files
+  to avoid duplicate/ambiguous columns.
+- **Dedup / conflict policy** — key `(symbol, interval, open_time)`; daily wins
+  over monthly on conflict; identical bars deduplicated; same-source
+  inconsistencies and OHLC violations recorded; `--strict` fails on any.
+- **Manifests + reports** — `materialization_manifest.json` (with
+  `output_scope` FULL_OUTPUT vs SAMPLE_OUTPUT), `coverage_report.json`,
+  `data_quality_report.json`, `duplicate_report.json`, `conflict_report.json`,
+  and per-symbol resume sidecars — all under `local_data/` (uncommitted).
+- **Validation target** `binance-um-klines-parquet` (`PQ-*` rules) querying the
+  Parquet layer through DuckDB (logical schema, key/date uniqueness, null, OHLC,
+  date policy, manifest-vs-actual counts, CSV absence). Requires an explicit
+  `--manifest`; clone-safe `--all` validates it only when present.
+- **Dataset registration** — `market.binance.um.klines.1d.parquet` registered as
+  `draft` (derived from `market.binance.um.klines`) with a `DATA_CATALOG.md`
+  entry.
+- **Documentation** — `docs/binance_um_klines_parquet_materialization.md` and
+  `docs/klines_access.md`.
+- **Dependencies** — `duckdb` (query engine) and `pyarrow` (writer); the CLI
+  emits a clear error and non-zero exit when a dependency is missing.
+
+---
+
 ## [v0.6.0] — 2026-06-16
 
 ### Added — Phase 5: Binance USD-M Kline Historical Pipeline
