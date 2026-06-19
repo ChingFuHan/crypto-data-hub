@@ -81,8 +81,9 @@ Interval rules:
 | `1d` | `market.binance.um.klines.1d.parquet` | `(symbol, date)` is unique. |
 | `4h` | `market.binance.um.klines.4h.parquet` | `(symbol, date)` is a grouping field with at most 6 rows. |
 | `1h` | `market.binance.um.klines.1h.parquet` | `(symbol, date)` is a grouping field with at most 24 rows. |
+| `15m` | `market.binance.um.klines.15m.parquet` | `(symbol, date)` is a grouping field with at most 96 rows. |
 
-For `4h` and `1h`, do not join or upsert by `(symbol, date)` alone.
+For `4h`, `1h`, and `15m`, do not join or upsert by `(symbol, date)` alone.
 
 ---
 
@@ -97,6 +98,8 @@ The materialization manifest records `output_scope`:
 Phase 7 completion requires the 4h Parquet manifest to be `FULL_OUTPUT` with
 the full raw 4h symbol set. Phase 8 adds the same requirement for the 1h
 Parquet manifest, with `1h` row_count exceeding `4h` row_count (ratio `>= 3.5`).
+Phase 9 adds the same requirement for the 15m Parquet manifest, with `15m`
+row_count exceeding `1h` row_count (ratio `>= 3.5`).
 
 ---
 

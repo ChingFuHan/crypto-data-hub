@@ -7,6 +7,37 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.10.0] — 2026-06-19
+
+### Added — Phase 9: Binance UM 15M Kline Parquet Materialization
+
+- **Interval-aware materializer** — `binance_um_klines_parquet.py` extended to
+  `--interval {1d,4h,1h,15m}`. Adds the `15m` interval to `ALLOWED_INTERVALS`,
+  `INTERVAL_MILLISECONDS` (`900_000`), and `ROWS_PER_SYMBOL_DATE_LIMIT` (`96`).
+  `CODE_VERSION` bumped to `v0.10.0`. 1D/4H/1H behaviour is preserved
+  (regression-tested).
+- **15M time policy** — `open_time % 900_000 == 0` and
+  `close_time = open_time + 899_999`, enforced at materialization
+  (`find_time_rule_violations`, `--strict` fails) and re-checked in validation
+  (`PQ-OPEN-TIME-ALIGNMENT`, `PQ-CLOSE-TIME-RULE`).
+- **15M key policy** — unique key stays `(symbol, interval, open_time)`; `(symbol,
+  date)` is a grouping column with **≤ 96 rows/day** (`PQ-SYMBOL-DATE-LIMIT`).
+- **15M Parquet dataset** at
+  `local_data/binance_um_klines/interval=15m/parquet/` — `FULL_OUTPUT`,
+  `symbol_count = 921`, `row_count = 61055727`, `failed_symbol_count = 0`,
+  `generated_csv_file_count = 0`, same Hive layout
+  (`symbol=<S>/year=<Y>/part-000.parquet`).
+- **Validation** — `binance-um-klines-parquet --interval 15m`; adds
+  `PQ-15M-ROWS-GT-1H` (15m row_count must exceed 1h, ratio `>= 3.5`), gated to
+  production FULL_OUTPUT and skipped for fixtures.
+- **Dataset registration** — `market.binance.um.klines.15m.parquet` registered as
+  `draft` with a `DATA_CATALOG.md` entry (registered dataset count → 6).
+- **Tests** — header/header-less 15M CSV, 15m alignment + close-time, ≤96 rows/day
+  legal, >96 rows/day detected, DuckDB read + explicit 15m validation, and 1D/4H/1H
+  regression. `91` tests pass.
+
+---
+
 ## [v0.9.0] — 2026-06-18
 
 ### Added — Phase 8: Binance UM 1H Kline Parquet Materialization

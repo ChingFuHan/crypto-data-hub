@@ -58,6 +58,18 @@ def twentyfour_rows_for_taipei_date_20200101():
     return [row_for_interval(ms, "1h") for ms in opens]
 
 
+FIFTEEN_M_MS = 900_000
+
+
+def ninetysix_rows_for_taipei_date_20200101():
+    # Taipei 2020-01-01 spans UTC 2019-12-31 16:00 .. 2020-01-01 15:45, i.e. the
+    # 96 quarter-hour-aligned opens 00:00..23:45 Taipei. This is the legal daily
+    # maximum for the 15m interval (24h / 15m = 96).
+    base = ms_utc(2019, 12, 31, 16)
+    opens = [base + q * FIFTEEN_M_MS for q in range(96)]
+    return [row_for_interval(ms, "15m") for ms in opens]
+
+
 def csv_bytes(rows, *, header=False):
     lines = []
     if header:
@@ -272,6 +284,23 @@ class ParsingTest(unittest.TestCase):
             self.assertEqual(rec.interval, "1h")
             self.assertEqual(rec.close_time, OPEN_TIME_20200101 + ONE_H_MS - 1)
 
+    def test_case07d_15m_header_and_no_header_csv(self):
+        row = row_for_interval(OPEN_TIME_20200101, "15m")
+        for header in (False, True):
+            rows = mat.parse_kline_csv(csv_bytes([row], header=header))
+            self.assertEqual(len(rows), 1)
+            rec = mat.build_record(
+                rows[0],
+                symbol="BTCUSDT",
+                interval="15m",
+                archive_source="monthly",
+                archive_period="2020-01",
+                source_archive="x.zip",
+            )
+            self.assertEqual(rec.interval, "15m")
+            self.assertEqual(rec.open_time, OPEN_TIME_20200101)
+            self.assertEqual(rec.close_time, OPEN_TIME_20200101 + FIFTEEN_M_MS - 1)
+
 
 # --------------------------------------------------------------------------- #
 # Dedup / conflict / OHLC (cases 8-12)
@@ -461,6 +490,62 @@ class NormalizeTest(unittest.TestCase):
             with self.assertRaises(mat.StrictModeError):
                 mat.normalize_symbol("BBBUSDT", specs, interval="1h", strict=True)
 
+    def test_case12f_15m_time_rules_detect_alignment_and_close_time(self):
+        aligned = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101, "15m")]))[0],
+            symbol="BTCUSDT", interval="15m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(mat.find_time_rule_violations([aligned], interval="15m"), [])
+
+        bad_open = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([row_for_interval(OPEN_TIME_20200101 + 1, "15m")]))[0],
+            symbol="BTCUSDT", interval="15m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        bad_close_row = (
+            f"{OPEN_TIME_20200101},1.0,2.0,0.5,1.5,10.0,"
+            f"{OPEN_TIME_20200101 + FIFTEEN_M_MS},15.0,3,5.0,7.5,0"
+        )
+        bad_close = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([bad_close_row]))[0],
+            symbol="BTCUSDT", interval="15m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(
+            len(mat.find_time_rule_violations([bad_open, bad_close], interval="15m")),
+            2,
+        )
+
+    def test_case12g_15m_same_date_limit_allows_96_rejects_97(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            rows = ninetysix_rows_for_taipei_date_20200101()
+            archive = write_archive(
+                raw, "monthly", "AAAUSDT", "2020-01", rows, interval="15m"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("AAAUSDT", specs, interval="15m", strict=False)
+            self.assertEqual(res.max_rows_per_date, 96)
+            self.assertEqual(res.rows_per_date_violation_count, 0)
+
+            # A 97th distinct open_time still on Taipei 2020-01-01 (16:07:30 UTC ->
+            # 00:07:30 Taipei) is one over the daily limit.
+            extra = row_for_interval(ms_utc(2019, 12, 31, 16) + 450_000, "15m")
+            ninetyseven = rows + [extra]
+            archive = write_archive(
+                raw, "monthly", "BBBUSDT", "2020-01", ninetyseven, interval="15m"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("BBBUSDT", specs, interval="15m", strict=False)
+            self.assertEqual(res.max_rows_per_date, 97)
+            self.assertEqual(res.rows_per_date_violation_count, 1)
+            with self.assertRaises(mat.StrictModeError):
+                mat.normalize_symbol("BBBUSDT", specs, interval="15m", strict=True)
+
 
 # --------------------------------------------------------------------------- #
 # End-to-end: resume / DuckDB / validation / counts (cases 13-17)
@@ -506,6 +591,20 @@ class EndToEndTest(unittest.TestCase):
                 )
             ],
             interval="1h",
+        )
+
+    def _fifteen_m_specs(self, tmp):
+        return build_env(
+            tmp,
+            [
+                (
+                    "monthly",
+                    "BTCUSDT",
+                    "2020-01",
+                    ninetysix_rows_for_taipei_date_20200101(),
+                )
+            ],
+            interval="15m",
         )
 
     def test_case13_resume_skips_completed_symbol(self):
@@ -698,6 +797,44 @@ class EndToEndTest(unittest.TestCase):
             )
             self.assertEqual(manifest["failed_symbol_count"], 1)
 
+    def test_case18d_duckdb_reads_and_validates_15m(self):
+        import duckdb
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = self._fifteen_m_specs(tmp)
+            manifest = mat.run(make_config(manifest_p, raw, out, interval="15m"))
+            self.assertEqual(
+                manifest["materialized_dataset_id"],
+                "market.binance.um.klines.15m.parquet",
+            )
+            self.assertEqual(manifest["interval"], "15m")
+            self.assertEqual(manifest["output_scope"], "FULL_OUTPUT")
+            self.assertEqual(manifest["symbol_count"], 1)
+            self.assertEqual(manifest["row_count"], 96)
+            self.assertEqual(manifest["generated_csv_file_count"], 0)
+
+            glob = str(out / "**" / "*.parquet")
+            n, max_per_date = duckdb.sql(
+                f"SELECT COUNT(*), MAX(n) FROM ("
+                f"SELECT symbol, date, COUNT(*) AS n "
+                f"FROM read_parquet('{glob}', hive_partitioning=true) "
+                f"GROUP BY symbol, date)"
+            ).fetchone()
+            self.assertEqual(n, 1)
+            self.assertEqual(max_per_date, 96)
+
+            # open_time alignment + close_time rule hold for every 15m bar.
+            bad = duckdb.sql(
+                f"SELECT COUNT(*) FROM read_parquet('{glob}', "
+                f"hive_partitioning=true) "
+                f"WHERE open_time % {FIFTEEN_M_MS} != 0 "
+                f"OR close_time != open_time + {FIFTEEN_M_MS - 1}"
+            ).fetchone()[0]
+            self.assertEqual(bad, 0)
+
+            mat_manifest = out / "manifests" / "materialization_manifest.json"
+            report = validate_parquet_manifest(mat_manifest, "15m", ".")
+            self.assertFalse(report.has_failures, report.render())
+
     def test_case19_default_paths_are_interval_aware(self):
         self.assertIn("interval=4h", mat.default_raw_root("4h"))
         self.assertIn("interval=4h", mat.default_manifest("4h"))
@@ -705,6 +842,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("interval=1h", mat.default_raw_root("1h"))
         self.assertIn("interval=1h", mat.default_manifest("1h"))
         self.assertIn("interval=1h", mat.default_output_root("1h"))
+        self.assertIn("interval=15m", mat.default_raw_root("15m"))
+        self.assertIn("interval=15m", mat.default_manifest("15m"))
+        self.assertIn("interval=15m", mat.default_output_root("15m"))
 
     def test_full_vs_sample_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

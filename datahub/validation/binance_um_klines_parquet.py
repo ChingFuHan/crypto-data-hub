@@ -21,16 +21,18 @@ from typing import Any
 from .result import ValidationReport
 
 RAW_DATASET_ID = "market.binance.um.klines"
-ALLOWED_INTERVALS = ("1d", "4h", "1h")
+ALLOWED_INTERVALS = ("1d", "4h", "1h", "15m")
 INTERVAL_MILLISECONDS = {
     "1d": 86_400_000,
     "4h": 14_400_000,
     "1h": 3_600_000,
+    "15m": 900_000,
 }
 ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1d": 1,
     "4h": 6,
     "1h": 24,
+    "15m": 96,
 }
 EXPECTED_PRIMARY_KEY = ["symbol", "interval", "open_time"]
 GITIGNORE_LOCAL_DATA = "local_data/"
@@ -464,6 +466,16 @@ def _validate_with_duckdb(
             rule_id="PQ-1H-ROWS-GT-4H",
             this_interval="1h",
             base_interval="4h",
+            min_ratio=3.5,
+        )
+    elif interval == "15m":
+        _validate_row_count_regression(
+            report,
+            manifest,
+            file_name,
+            rule_id="PQ-15M-ROWS-GT-1H",
+            this_interval="15m",
+            base_interval="1h",
             min_ratio=3.5,
         )
 
