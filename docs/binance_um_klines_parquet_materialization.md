@@ -1,4 +1,4 @@
-# Binance UM Kline Parquet Materialization (Phases 6–9)
+# Binance UM Kline Parquet Materialization (Phases 6–10)
 
 > How the immutable raw zip archive produced by
 > `datahub.ingestion.binance_um_klines` is materialized into
@@ -30,8 +30,9 @@ The materializer currently supports:
 - `4h` from Phase 7.
 - `1h` from Phase 8.
 - `15m` from Phase 9.
+- `5m` from Phase 10.
 
-Other raw intervals (`5m`, `1m`) remain future materialization work.
+Other raw intervals (`1m`) remain future materialization work.
 
 Materialized dataset IDs:
 
@@ -39,6 +40,7 @@ Materialized dataset IDs:
 - `market.binance.um.klines.4h.parquet`
 - `market.binance.um.klines.1h.parquet`
 - `market.binance.um.klines.15m.parquet`
+- `market.binance.um.klines.5m.parquet`
 
 ---
 
@@ -56,7 +58,7 @@ python -m datahub.materialization.binance_um_klines_parquet \
 
 | Flag | Meaning |
 |------|---------|
-| `--interval 1d|4h|1h|15m` | Materialized interval. Defaults to `1d`. |
+| `--interval 1d|4h|1h|15m|5m` | Materialized interval. Defaults to `1d`. |
 | `--all` | Materialize every verified symbol in the raw manifest. |
 | `--symbols S1 S2` | Materialize only selected symbols (`SAMPLE_OUTPUT`). |
 | `--raw-root` | Raw archive root. Default is `local_data/.../interval=<INTERVAL>/raw`. |
@@ -132,8 +134,9 @@ Interval-specific rules:
 | `4h` | `open_time % 14400000 == 0`; `close_time = open_time + 14399999` | At most 6 rows. |
 | `1h` | `open_time % 3600000 == 0`; `close_time = open_time + 3599999` | At most 24 rows. |
 | `15m` | `open_time % 900000 == 0`; `close_time = open_time + 899999` | At most 96 rows. |
+| `5m` | `open_time % 300000 == 0`; `close_time = open_time + 299999` | At most 288 rows. |
 
-`(symbol, date)` is a grouping field for `4h`, `1h`, and `15m`, not a unique key.
+`(symbol, date)` is a grouping field for `4h`, `1h`, `15m`, and `5m`, not a unique key.
 
 ---
 
@@ -198,6 +201,7 @@ row-count regression against the coarser interval's manifest:
 - `4h` row_count must exceed `1d` row_count.
 - `1h` row_count must exceed `4h` row_count, and `1h / 4h >= 3.5`.
 - `15m` row_count must exceed `1h` row_count, and `15m / 1h >= 3.5`.
+- `5m` row_count must exceed `15m` row_count, and `5m / 15m >= 2.5`.
 
 These regression checks are skipped for sample fixtures and when the baseline
 interval manifest is absent.
@@ -229,6 +233,6 @@ print(df)
 ## Future Phases
 
 PostgreSQL serving, live API updates, strategy / trading layers, and research
-workspace integration are outside Phase 9.
+workspace integration are outside Phase 10.
 
 Dependencies: `duckdb` for validation/querying and `pyarrow` for writing.

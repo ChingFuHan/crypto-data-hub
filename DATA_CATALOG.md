@@ -172,9 +172,29 @@ Full design: [`docs/binance_um_klines_parquet_materialization.md`](docs/binance_
 
 ---
 
+### market.binance.um.klines.5m.parquet
+
+- **Name:** Binance USD-M Futures Klines 5M (Parquet)
+- **Description:** DuckDB-queryable Hive-partitioned Parquet materialization of the Binance USD-M Futures 5m Kline raw archive.
+- **Owner:** data-platform
+- **Source:** derived — `market.binance.um.klines` (Parquet materialization of the raw 5m zip archive)
+- **Schema:** see `DATA_CONTRACT.md#contract-binance-usd-m-futures-klines` (logical DuckDB schema adds `open_time_utc`, `open_time_taipei`, `date`, `year`, `month`, `source_archive`, `archive_source`, `archive_period`; `symbol`/`year` come from Hive partitions)
+- **Update Frequency:** daily
+- **Primary key:** `[symbol, interval, open_time]`; `(symbol, date)` is a grouping field with at most 288 rows.
+- **Layers:** raw zip archive = immutable source; Parquet = query/materialized layer; **DuckDB** = standard query engine. CSV is transient (inside zips only); `generated_csv_file_count = 0`.
+- **Local data:** `local_data/binance_um_klines/interval=5m/parquet/` — **not committed** (large market data; machine-specific). See `docs/market_data_storage_policy.md`.
+- **Materialize:** `python -m datahub.materialization.binance_um_klines_parquet --interval 5m --all --workers 4 --resume`
+- **Validation:** `python -m datahub.validation --target binance-um-klines-parquet --interval 5m --manifest local_data/binance_um_klines/interval=5m/parquet/manifests/materialization_manifest.json`
+- **Known Issues:** Lifecycle remains `draft` and `contract_validated = false`. Parquet output is uncommitted (machine-specific). PostgreSQL serving, live API updates, strategy/trading, and research workspace integration are future phases.
+- **Status:** draft
+
+Full design: [`docs/binance_um_klines_parquet_materialization.md`](docs/binance_um_klines_parquet_materialization.md) · access: [`docs/klines_access.md`](docs/klines_access.md).
+
+---
+
 ## Catalog–Registry Contract
 
 - Every catalog entry corresponds to exactly one entry in `dataset_registry.json`.
 - The registry is the source of truth; the catalog never lists a dataset that is not registered.
 - The `Status` shown here MUST equal the registry `status`, which MUST equal the dataset's true lifecycle state.
-- Registered dataset count: **6**.
+- Registered dataset count: **7**.
