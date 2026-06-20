@@ -59,7 +59,7 @@ Primary key: `(symbol, interval, open_time)`.
 
 ## Kline interval vs archive package source
 
-- **Kline interval** (`1d/4h/1h/15m/5m/1m`) = the row period.
+- **Kline interval** (`1d/4h/1h/15m/5m/3m/1m`) = the row period.
 - **Archive package source** (`monthly`/`daily`) = how Binance packages files —
   `monthly` is the historical base, `daily` is the recent delta. It is **not** a
   Kline interval.

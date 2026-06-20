@@ -82,11 +82,11 @@ def make_config(tmp, **overrides):
 class IntervalTests(unittest.TestCase):
     def test_supported_intervals_constant(self):
         self.assertEqual(
-            kl.ALLOWED_INTERVALS, ("1d", "4h", "1h", "15m", "5m", "1m")
+            kl.ALLOWED_INTERVALS, ("1d", "4h", "1h", "15m", "5m", "3m", "1m")
         )
 
     def test_validate_interval_accepts_all_supported(self):
-        for interval in ("1d", "4h", "1h", "15m", "5m", "1m"):
+        for interval in ("1d", "4h", "1h", "15m", "5m", "3m", "1m"):
             self.assertEqual(kl.validate_interval(interval), interval)
 
     def test_validate_interval_rejects_unsupported(self):
@@ -100,7 +100,7 @@ class IntervalTests(unittest.TestCase):
             cwd=REPO_ROOT, text=True, capture_output=True, check=False,
         )
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("1d 4h 1h 15m 5m 1m", result.stderr)
+        self.assertIn("1d 4h 1h 15m 5m 3m 1m", result.stderr)
 
 
 class ParsingTests(unittest.TestCase):

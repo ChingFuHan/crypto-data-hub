@@ -15,7 +15,7 @@ from typing import Any
 from .result import ValidationReport
 
 DATASET_ID = "market.binance.um.klines"
-ALLOWED_INTERVALS = ("1d", "4h", "1h", "15m", "5m", "1m")
+ALLOWED_INTERVALS = ("1d", "4h", "1h", "15m", "5m", "3m", "1m")
 EXPECTED_PRIMARY_KEY = ["symbol", "interval", "open_time"]
 GITIGNORE_LOCAL_DATA = "local_data/"
 

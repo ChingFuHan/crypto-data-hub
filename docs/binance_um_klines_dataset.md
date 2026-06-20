@@ -13,7 +13,7 @@
 | Base dataset_id | `market.binance.um.klines` |
 | Interval variant | `market.binance.um.klines.<INTERVAL>` (first: `market.binance.um.klines.1d`) |
 | Primary key | `symbol + interval + open_time` |
-| Supported intervals | `1d` · `4h` · `1h` · `15m` · `5m` · `1m` |
+| Supported intervals | `1d` · `4h` · `1h` · `15m` · `5m` · `3m` · `1m` |
 | First production interval | `1d` |
 | Lifecycle status | `draft` |
 | Source | Binance Data Vision public archive |
@@ -55,7 +55,7 @@ is `https://data.binance.vision/`; the symbol/file index is the S3 listing at
 This distinction is load-bearing and kept separate everywhere:
 
 - **Kline interval** — the trading-data period of each row: `1d`, `4h`, `1h`,
-  `15m`, `5m`, `1m`.
+  `15m`, `5m`, `3m`, `1m`.
 - **Archive package source** — how Binance *packages* files on disk: `monthly`
   (historical base) or `daily` (recent delta).
 

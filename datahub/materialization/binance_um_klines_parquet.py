@@ -74,17 +74,18 @@ else:
 # --------------------------------------------------------------------------- #
 
 RAW_DATASET_ID = "market.binance.um.klines"
-CODE_VERSION = "v0.11.0"
+CODE_VERSION = "v0.12.0"
 QUERY_ENGINE = "duckdb"
 OUTPUT_FORMAT = "parquet"
 
-ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h", "1h", "15m", "5m")
+ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h", "1h", "15m", "5m", "3m")
 INTERVAL_MILLISECONDS = {
     "1d": 86_400_000,
     "4h": 14_400_000,
     "1h": 3_600_000,
     "15m": 900_000,
     "5m": 300_000,
+    "3m": 180_000,
 }
 ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1d": 1,
@@ -92,6 +93,7 @@ ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1h": 24,
     "15m": 96,
     "5m": 288,
+    "3m": 480,
 }
 PRIMARY_KEY: tuple[str, ...] = ("symbol", "interval", "open_time")
 

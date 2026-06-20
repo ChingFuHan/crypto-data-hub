@@ -7,6 +7,50 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.12.0] — 2026-06-20
+
+### Added — Phase 11: Binance UM 3M Kline Parquet Materialization
+
+- **3M raw ingestion** — `binance_um_klines.py` adds `3m` to `ALLOWED_INTERVALS`,
+  so `--interval 3m` discovers, downloads, verifies, and archives the immutable
+  3m zip layer at `local_data/binance_um_klines/interval=3m/`. Raw validation
+  (`binance-um-klines --interval 3m`) accepts the new interval too.
+- **Interval-aware materializer** — `binance_um_klines_parquet.py` extended to
+  `--interval {1d,4h,1h,15m,5m,3m}`. Adds the `3m` interval to
+  `ALLOWED_INTERVALS`, `INTERVAL_MILLISECONDS` (`180_000`), and
+  `ROWS_PER_SYMBOL_DATE_LIMIT` (`480`). `CODE_VERSION` bumped to `v0.12.0`.
+  1D/4H/1H/15M/5M behaviour is preserved (regression-tested).
+- **3M time policy** — `open_time % 180_000 == 0` and
+  `close_time = open_time + 179_999`, enforced at materialization
+  (`find_time_rule_violations`, `--strict` fails) and re-checked in validation
+  (`PQ-OPEN-TIME-ALIGNMENT`, `PQ-CLOSE-TIME-RULE`).
+- **3M key policy** — unique key stays `(symbol, interval, open_time)`; `(symbol,
+  date)` is a grouping column with **≤ 480 rows/day** (`PQ-SYMBOL-DATE-LIMIT`).
+- **3M Parquet dataset** at
+  `local_data/binance_um_klines/interval=3m/parquet/` — `FULL_OUTPUT`,
+  `symbol_count = 922` (`== raw_discovered_symbol_count`),
+  `failed_symbol_count = 0`, `generated_csv_file_count = 0`, same Hive layout
+  (`symbol=<S>/year=<Y>/part-000.parquet`).
+- **New listing — cross-interval universe note.** The 3m raw discovery found
+  **922** symbols vs the **921** baseline shared by 1D/4H/1H/15M/5M. The extra
+  symbol is `REUSDT`, a perpetual **listed after the previous phases ran**
+  (single daily archive `REUSDT-3m-2026-06-18.zip`). This is a new listing, not
+  a data error: 3m is the universe as of its ingestion date. FULL_OUTPUT is
+  therefore defined as `symbol_count == raw_discovered_symbol_count`
+  (`>= 921`), not a hard `== 921`. Downstream cross-interval research should take
+  the symbol intersection; the raw layer is never trimmed to force a count.
+- **Validation** — `binance-um-klines-parquet --interval 3m`; adds
+  `PQ-3M-ROWS-GT-5M` (3m row_count must exceed 5m, ratio `>= 1.5`), gated to
+  production FULL_OUTPUT with `raw_discovered_symbol_count >= 921` (was a hard
+  `== 921`) and skipped for fixtures.
+- **Dataset registration** — `market.binance.um.klines.3m.parquet` registered as
+  `draft` with a `DATA_CATALOG.md` entry (registered dataset count → 8).
+- **Tests** — header/header-less 3M CSV, 3m alignment + close-time, ≤480 rows/day
+  legal, >480 rows/day detected, DuckDB read + explicit 3m validation, and
+  1D/4H/1H/15M/5M regression. `99` tests pass.
+
+---
+
 ## [v0.11.0] — 2026-06-19
 
 ### Added — Phase 10: Binance UM 5M Kline Parquet Materialization

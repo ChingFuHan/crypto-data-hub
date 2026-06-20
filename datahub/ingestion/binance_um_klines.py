@@ -50,7 +50,7 @@ CODE_VERSION = "v0.6.0"
 
 # Allowed Kline intervals are defined once here. Adding an interval is a single
 # edit to this tuple; nothing else hard-codes ``1d``.
-ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h", "1h", "15m", "5m", "1m")
+ALLOWED_INTERVALS: tuple[str, ...] = ("1d", "4h", "1h", "15m", "5m", "3m", "1m")
 
 # Archive package sources (NOT Kline intervals).
 ARCHIVE_SOURCES: tuple[str, ...] = ("monthly", "daily")

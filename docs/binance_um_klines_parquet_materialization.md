@@ -1,4 +1,4 @@
-# Binance UM Kline Parquet Materialization (Phases 6–10)
+# Binance UM Kline Parquet Materialization (Phases 6–11)
 
 > How the immutable raw zip archive produced by
 > `datahub.ingestion.binance_um_klines` is materialized into
@@ -31,6 +31,7 @@ The materializer currently supports:
 - `1h` from Phase 8.
 - `15m` from Phase 9.
 - `5m` from Phase 10.
+- `3m` from Phase 11.
 
 Other raw intervals (`1m`) remain future materialization work.
 
@@ -41,6 +42,7 @@ Materialized dataset IDs:
 - `market.binance.um.klines.1h.parquet`
 - `market.binance.um.klines.15m.parquet`
 - `market.binance.um.klines.5m.parquet`
+- `market.binance.um.klines.3m.parquet`
 
 ---
 
@@ -58,7 +60,7 @@ python -m datahub.materialization.binance_um_klines_parquet \
 
 | Flag | Meaning |
 |------|---------|
-| `--interval 1d|4h|1h|15m|5m` | Materialized interval. Defaults to `1d`. |
+| `--interval 1d|4h|1h|15m|5m|3m` | Materialized interval. Defaults to `1d`. |
 | `--all` | Materialize every verified symbol in the raw manifest. |
 | `--symbols S1 S2` | Materialize only selected symbols (`SAMPLE_OUTPUT`). |
 | `--raw-root` | Raw archive root. Default is `local_data/.../interval=<INTERVAL>/raw`. |
@@ -135,8 +137,9 @@ Interval-specific rules:
 | `1h` | `open_time % 3600000 == 0`; `close_time = open_time + 3599999` | At most 24 rows. |
 | `15m` | `open_time % 900000 == 0`; `close_time = open_time + 899999` | At most 96 rows. |
 | `5m` | `open_time % 300000 == 0`; `close_time = open_time + 299999` | At most 288 rows. |
+| `3m` | `open_time % 180000 == 0`; `close_time = open_time + 179999` | At most 480 rows. |
 
-`(symbol, date)` is a grouping field for `4h`, `1h`, `15m`, and `5m`, not a unique key.
+`(symbol, date)` is a grouping field for `4h`, `1h`, `15m`, `5m`, and `3m`, not a unique key.
 
 ---
 
@@ -202,9 +205,24 @@ row-count regression against the coarser interval's manifest:
 - `1h` row_count must exceed `4h` row_count, and `1h / 4h >= 3.5`.
 - `15m` row_count must exceed `1h` row_count, and `15m / 1h >= 3.5`.
 - `5m` row_count must exceed `15m` row_count, and `5m / 15m >= 2.5`.
+- `3m` row_count must exceed `5m` row_count, and `3m / 5m >= 1.5`.
 
 These regression checks are skipped for sample fixtures and when the baseline
-interval manifest is absent.
+interval manifest is absent. The production gate is
+`raw_discovered_symbol_count >= 921` (the established baseline plus any later
+listings), not a hard `== 921`.
+
+### Symbol universe (new listings)
+
+`FULL_OUTPUT` means `symbol_count == raw_discovered_symbol_count` — the
+materialized set equals the raw universe discovered at ingestion time, **not** a
+fixed number. Phase 11's 3m ingestion discovered **922** symbols versus the
+**921** baseline shared by 1D/4H/1H/15M/5M. The extra symbol is `REUSDT`, a
+perpetual **listed after the earlier phases ran** (first 3m archive
+`REUSDT-3m-2026-06-18.zip`). This is a new listing, not a data error: each
+interval's universe reflects its own ingestion date. The raw layer is never
+trimmed to force a count; cross-interval research should intersect symbols until
+the coarser intervals are re-ingested.
 
 `python -m datahub.validation --all` remains clone-safe: raw and Parquet
 `local_data` layers are validated only when their manifests are present.
@@ -233,6 +251,6 @@ print(df)
 ## Future Phases
 
 PostgreSQL serving, live API updates, strategy / trading layers, and research
-workspace integration are outside Phase 10.
+workspace integration are outside Phase 11.
 
 Dependencies: `duckdb` for validation/querying and `pyarrow` for writing.

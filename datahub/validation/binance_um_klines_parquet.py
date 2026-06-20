@@ -21,13 +21,14 @@ from typing import Any
 from .result import ValidationReport
 
 RAW_DATASET_ID = "market.binance.um.klines"
-ALLOWED_INTERVALS = ("1d", "4h", "1h", "15m", "5m")
+ALLOWED_INTERVALS = ("1d", "4h", "1h", "15m", "5m", "3m")
 INTERVAL_MILLISECONDS = {
     "1d": 86_400_000,
     "4h": 14_400_000,
     "1h": 3_600_000,
     "15m": 900_000,
     "5m": 300_000,
+    "3m": 180_000,
 }
 ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1d": 1,
@@ -35,6 +36,7 @@ ROWS_PER_SYMBOL_DATE_LIMIT = {
     "1h": 24,
     "15m": 96,
     "5m": 288,
+    "3m": 480,
 }
 EXPECTED_PRIMARY_KEY = ["symbol", "interval", "open_time"]
 GITIGNORE_LOCAL_DATA = "local_data/"
@@ -490,6 +492,16 @@ def _validate_with_duckdb(
             base_interval="15m",
             min_ratio=2.5,
         )
+    elif interval == "3m":
+        _validate_row_count_regression(
+            report,
+            manifest,
+            file_name,
+            rule_id="PQ-3M-ROWS-GT-5M",
+            this_interval="3m",
+            base_interval="5m",
+            min_ratio=1.5,
+        )
 
     con.close()
 
@@ -509,11 +521,13 @@ def _validate_row_count_regression(
     A finer interval has more bars per day, so its production row_count must be
     strictly greater than the coarser baseline. When ``min_ratio`` is given the
     ratio (this / base) must also clear that floor (e.g. 1h vs 4h >= 3.5).
-    The check runs only for production FULL_OUTPUT (raw universe = 921); it is
-    skipped for sample fixtures and when the baseline manifest is absent.
+    The check runs only for production FULL_OUTPUT (raw universe >= 921, i.e. the
+    established symbol baseline plus any later listings); it is skipped for sample
+    fixtures and when the baseline manifest is absent.
     """
+    raw_discovered = manifest.get("raw_discovered_symbol_count")
     if manifest.get("output_scope") != FULL_OUTPUT or (
-        manifest.get("raw_discovered_symbol_count") != 921
+        not isinstance(raw_discovered, int) or raw_discovered < 921
     ):
         report.skipped(
             rule_id,
