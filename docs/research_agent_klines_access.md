@@ -157,4 +157,5 @@ for row in rows[:3]:
 - ✅ Agent can distinguish Kline interval from archive package source.
 - ✅ Agent does not assume the current active universe equals the historical universe.
 
-Full Parquet materialization remains a **Phase 6** candidate.
+DuckDB Parquet materializations are available for `1d`, `4h`, `1h`, `15m`,
+`5m`, `3m`, and `1m`; see [klines_access.md](klines_access.md).

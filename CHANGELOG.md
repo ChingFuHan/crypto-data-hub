@@ -7,6 +7,41 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.13.0] — 2026-06-21
+
+### Added — Phase 12: Binance UM 1M Kline Parquet Materialization
+
+- **1M raw validation confirmed** — `binance-um-klines --interval 1m` passes
+  against `local_data/binance_um_klines/interval=1m/manifests/manifest.json`
+  with `13/13` checks passing.
+- **Interval-aware materializer** — `binance_um_klines_parquet.py` extended to
+  `--interval {1d,4h,1h,15m,5m,3m,1m}`. Adds the `1m` interval to
+  `ALLOWED_INTERVALS`, `INTERVAL_MILLISECONDS` (`60_000`), and
+  `ROWS_PER_SYMBOL_DATE_LIMIT` (`1_440`). `CODE_VERSION` bumped to `v0.13.0`.
+  1D/4H/1H/15M/5M/3M behaviour is preserved (regression-tested).
+- **1M time policy** — `open_time % 60_000 == 0` and
+  `close_time = open_time + 59_999`, enforced at materialization
+  (`find_time_rule_violations`, `--strict` fails) and re-checked in validation
+  (`PQ-OPEN-TIME-ALIGNMENT`, `PQ-CLOSE-TIME-RULE`).
+- **1M key policy** — unique key stays `(symbol, interval, open_time)`;
+  `(symbol, date)` is a grouping column with **≤ 1440 rows/day**
+  (`PQ-SYMBOL-DATE-LIMIT`).
+- **1M Parquet dataset** at
+  `local_data/binance_um_klines/interval=1m/parquet/` — `FULL_OUTPUT`,
+  `raw_discovered_symbol_count = 922`, `symbol_count = 922`,
+  `row_count = 918113837`, `file_count = 2667`, `failed_symbol_count = 0`,
+  `generated_csv_file_count = 0`, same Hive layout
+  (`symbol=<S>/year=<Y>/part-000.parquet`).
+- **Validation** — `binance-um-klines-parquet --interval 1m`; adds
+  `PQ-1M-ROWS-GT-3M` (1m row_count must exceed 3m, ratio `>= 2.5`), gated to
+  production FULL_OUTPUT with `raw_discovered_symbol_count >= 921` and skipped
+  for fixtures.
+- **Dataset registration** — `market.binance.um.klines.1m.parquet` registered
+  as `draft` with a `DATA_CATALOG.md` entry (registered dataset count -> 9).
+- **Tests** — header/header-less 1M CSV, 1m alignment + close-time,
+  ≤1440 rows/day legal, >1440 rows/day detected, DuckDB read + explicit 1m
+  validation, and 1D/4H/1H/15M/5M/3M regression.
+
 ## [v0.12.0] — 2026-06-20
 
 ### Added — Phase 11: Binance UM 3M Kline Parquet Materialization

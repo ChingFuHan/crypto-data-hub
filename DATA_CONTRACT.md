@@ -330,7 +330,7 @@ imputed or coerced — a missing required value fails loud (`ROOT.md` → *Fail 
 
 **Dataset name:** Binance USD-M Futures Klines
 **Dataset ID:** `market.binance.um.klines`  (raw family; materialized variants:
-`market.binance.um.klines.1d.parquet`, `market.binance.um.klines.4h.parquet`)
+`market.binance.um.klines.<INTERVAL>.parquet`)
 **Contract version:** `v0.1.0`  (moves with the dataset version)
 **Owner:** `data-platform`
 **Status:** `draft`  (raw and Parquet artifacts are validated draft outputs)
@@ -340,8 +340,8 @@ from the Binance Data Vision public archive and materialized by interval.
 (`https://data.binance.vision/data/futures/um/{monthly,daily}/klines/<SYMBOL>/<INTERVAL>/`)
 **Source timezone:** `UTC`  (storage: UTC, ISO 8601 / epoch milliseconds)
 **Primary key:** `[symbol, interval, open_time]`  (unique, non-null)
-**Supported raw intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `1m`
-**Materialized Parquet intervals:** `1d` · `4h`
+**Supported raw intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `3m` · `1m`
+**Materialized Parquet intervals:** `1d` · `4h` · `1h` · `15m` · `5m` · `3m` · `1m`
 
 > **Kline interval vs archive package source.** The Kline `interval` is the row
 > period. The archive package source (`monthly` historical base / `daily` recent
@@ -353,7 +353,7 @@ from the Binance Data Vision public archive and materialized by interval.
 | name | type | nullable | unit | constraints | description |
 |------|------|----------|------|-------------|-------------|
 | `symbol` | string | false | n/a | non-empty; Binance symbol | Trading symbol (e.g. `BTCUSDT`). Exposed from Hive partition path. |
-| `interval` | enum | false | n/a | `1d`\|`4h`\|`1h`\|`15m`\|`5m`\|`1m` | Kline interval. From archive path, not a CSV column. |
+| `interval` | enum | false | n/a | `1d`\|`4h`\|`1h`\|`15m`\|`5m`\|`3m`\|`1m` | Kline interval. From archive path, not a CSV column. |
 | `open_time` | timestamp | false | ms epoch (UTC) | `>= 0`; aligned to interval | Bar open time. Part of primary key. |
 | `open_time_utc` | timestamp | false | UTC wall-clock | derived from `open_time` | Bar open time as UTC timestamp. |
 | `open_time_taipei` | timestamp | false | Asia/Taipei wall-clock | derived from `open_time` | Bar open time in Taipei wall-clock time. |
@@ -389,7 +389,7 @@ from the Binance Data Vision public archive and materialized by interval.
 | K3 | Range / domain | Range / domain | Prices `> 0`; volumes `>= 0`; `trade_count >= 0`; `interval` in the supported set. |
 | K4 | OHLC consistency | Consistency | `high >= max(open, close)`; `low <= min(open, close)`; taker volumes `<=` totals. |
 | K5 | Time consistency | Consistency | `date` equals the Taipei date of `open_time_taipei`; `open_time` is interval-aligned; `close_time = open_time + interval_ms - 1`. |
-| K6 | Interval date policy | Consistency | For `1d`, `(symbol, date)` is unique. For `4h`, each `(symbol, date)` has at most 6 rows. |
+| K6 | Interval date policy | Consistency | `(symbol, date)` has at most `1d`: 1 row, `4h`: 6 rows, `1h`: 24 rows, `15m`: 96 rows, `5m`: 288 rows, `3m`: 480 rows, `1m`: 1440 rows. |
 | K7 | Archive integrity | Completeness | Every downloaded archive zip matches its published `.CHECKSUM` (SHA-256). Mismatch fails loud. |
 | K8 | Referential | Referential | `symbol` is cross-checkable against `reference.universe.metadata` but is **not** constrained to the current active universe (the archive includes delisted symbols). |
 

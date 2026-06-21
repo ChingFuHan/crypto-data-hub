@@ -94,6 +94,18 @@ def foureighty_rows_for_taipei_date_20200101():
     return [row_for_interval(ms, "3m") for ms in opens]
 
 
+ONE_M_MS = 60_000
+
+
+def fourteenforty_rows_for_taipei_date_20200101():
+    # Taipei 2020-01-01 spans UTC 2019-12-31 16:00 .. 2020-01-01 15:59, i.e.
+    # the 1440 minute-aligned opens 00:00..23:59 Taipei. This is the legal
+    # daily maximum for the 1m interval (24h * 60m = 1440).
+    base = ms_utc(2019, 12, 31, 16)
+    opens = [base + q * ONE_M_MS for q in range(1_440)]
+    return [row_for_interval(ms, "1m") for ms in opens]
+
+
 def csv_bytes(rows, *, header=False):
     lines = []
     if header:
@@ -358,6 +370,23 @@ class ParsingTest(unittest.TestCase):
             self.assertEqual(rec.interval, "3m")
             self.assertEqual(rec.open_time, OPEN_TIME_20200101)
             self.assertEqual(rec.close_time, OPEN_TIME_20200101 + THREE_M_MS - 1)
+
+    def test_case07g_1m_header_and_no_header_csv(self):
+        row = row_for_interval(OPEN_TIME_20200101, "1m")
+        for header in (False, True):
+            rows = mat.parse_kline_csv(csv_bytes([row], header=header))
+            self.assertEqual(len(rows), 1)
+            rec = mat.build_record(
+                rows[0],
+                symbol="BTCUSDT",
+                interval="1m",
+                archive_source="monthly",
+                archive_period="2020-01",
+                source_archive="x.zip",
+            )
+            self.assertEqual(rec.interval, "1m")
+            self.assertEqual(rec.open_time, OPEN_TIME_20200101)
+            self.assertEqual(rec.close_time, OPEN_TIME_20200101 + ONE_M_MS - 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -716,6 +745,67 @@ class NormalizeTest(unittest.TestCase):
             with self.assertRaises(mat.StrictModeError):
                 mat.normalize_symbol("BBBUSDT", specs, interval="3m", strict=True)
 
+    def test_case12l_1m_time_rules_detect_alignment_and_close_time(self):
+        aligned = mat.build_record(
+            mat.parse_kline_csv(
+                csv_bytes([row_for_interval(OPEN_TIME_20200101, "1m")])
+            )[0],
+            symbol="BTCUSDT", interval="1m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(mat.find_time_rule_violations([aligned], interval="1m"), [])
+
+        bad_open = mat.build_record(
+            mat.parse_kline_csv(
+                csv_bytes([row_for_interval(OPEN_TIME_20200101 + 1, "1m")])
+            )[0],
+            symbol="BTCUSDT", interval="1m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        bad_close_row = (
+            f"{OPEN_TIME_20200101},1.0,2.0,0.5,1.5,10.0,"
+            f"{OPEN_TIME_20200101 + ONE_M_MS},15.0,3,5.0,7.5,0"
+        )
+        bad_close = mat.build_record(
+            mat.parse_kline_csv(csv_bytes([bad_close_row]))[0],
+            symbol="BTCUSDT", interval="1m",
+            archive_source="monthly", archive_period="2020-01",
+            source_archive="x.zip",
+        )
+        self.assertEqual(
+            len(mat.find_time_rule_violations([bad_open, bad_close], interval="1m")),
+            2,
+        )
+
+    def test_case12m_1m_same_date_limit_allows_1440_rejects_1441(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            rows = fourteenforty_rows_for_taipei_date_20200101()
+            archive = write_archive(
+                raw, "monthly", "AAAUSDT", "2020-01", rows, interval="1m"
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("AAAUSDT", specs, interval="1m", strict=False)
+            self.assertEqual(res.max_rows_per_date, 1_440)
+            self.assertEqual(res.rows_per_date_violation_count, 0)
+
+            # A 1441st distinct open_time still on Taipei 2020-01-01 (16:00:30
+            # UTC -> 00:00:30 Taipei) is one over the daily limit.
+            extra = row_for_interval(ms_utc(2019, 12, 31, 16) + 30_000, "1m")
+            fourteenfortyone = rows + [extra]
+            archive = write_archive(
+                raw, "monthly", "BBBUSDT", "2020-01", fourteenfortyone,
+                interval="1m",
+            )
+            specs = self._specs({("monthly", "2020-01"): archive})
+            res = mat.normalize_symbol("BBBUSDT", specs, interval="1m", strict=False)
+            self.assertEqual(res.max_rows_per_date, 1_441)
+            self.assertEqual(res.rows_per_date_violation_count, 1)
+            with self.assertRaises(mat.StrictModeError):
+                mat.normalize_symbol("BBBUSDT", specs, interval="1m", strict=True)
+
 
 # --------------------------------------------------------------------------- #
 # End-to-end: resume / DuckDB / validation / counts (cases 13-17)
@@ -803,6 +893,20 @@ class EndToEndTest(unittest.TestCase):
                 )
             ],
             interval="3m",
+        )
+
+    def _one_m_specs(self, tmp):
+        return build_env(
+            tmp,
+            [
+                (
+                    "monthly",
+                    "BTCUSDT",
+                    "2020-01",
+                    fourteenforty_rows_for_taipei_date_20200101(),
+                )
+            ],
+            interval="1m",
         )
 
     def test_case13_resume_skips_completed_symbol(self):
@@ -1109,6 +1213,44 @@ class EndToEndTest(unittest.TestCase):
             report = validate_parquet_manifest(mat_manifest, "3m", ".")
             self.assertFalse(report.has_failures, report.render())
 
+    def test_case18g_duckdb_reads_and_validates_1m(self):
+        import duckdb
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_p, raw, out = self._one_m_specs(tmp)
+            manifest = mat.run(make_config(manifest_p, raw, out, interval="1m"))
+            self.assertEqual(
+                manifest["materialized_dataset_id"],
+                "market.binance.um.klines.1m.parquet",
+            )
+            self.assertEqual(manifest["interval"], "1m")
+            self.assertEqual(manifest["output_scope"], "FULL_OUTPUT")
+            self.assertEqual(manifest["symbol_count"], 1)
+            self.assertEqual(manifest["row_count"], 1_440)
+            self.assertEqual(manifest["generated_csv_file_count"], 0)
+
+            glob = str(out / "**" / "*.parquet")
+            n, max_per_date = duckdb.sql(
+                f"SELECT COUNT(*), MAX(n) FROM ("
+                f"SELECT symbol, date, COUNT(*) AS n "
+                f"FROM read_parquet('{glob}', hive_partitioning=true) "
+                f"GROUP BY symbol, date)"
+            ).fetchone()
+            self.assertEqual(n, 1)
+            self.assertEqual(max_per_date, 1_440)
+
+            # open_time alignment + close_time rule hold for every 1m bar.
+            bad = duckdb.sql(
+                f"SELECT COUNT(*) FROM read_parquet('{glob}', "
+                f"hive_partitioning=true) "
+                f"WHERE open_time % {ONE_M_MS} != 0 "
+                f"OR close_time != open_time + {ONE_M_MS - 1}"
+            ).fetchone()[0]
+            self.assertEqual(bad, 0)
+
+            mat_manifest = out / "manifests" / "materialization_manifest.json"
+            report = validate_parquet_manifest(mat_manifest, "1m", ".")
+            self.assertFalse(report.has_failures, report.render())
+
     def test_case19_default_paths_are_interval_aware(self):
         self.assertIn("interval=4h", mat.default_raw_root("4h"))
         self.assertIn("interval=4h", mat.default_manifest("4h"))
@@ -1125,6 +1267,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("interval=3m", mat.default_raw_root("3m"))
         self.assertIn("interval=3m", mat.default_manifest("3m"))
         self.assertIn("interval=3m", mat.default_output_root("3m"))
+        self.assertIn("interval=1m", mat.default_raw_root("1m"))
+        self.assertIn("interval=1m", mat.default_manifest("1m"))
+        self.assertIn("interval=1m", mat.default_output_root("1m"))
 
     def test_full_vs_sample_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

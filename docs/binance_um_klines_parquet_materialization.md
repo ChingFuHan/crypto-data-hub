@@ -1,4 +1,4 @@
-# Binance UM Kline Parquet Materialization (Phases 6–11)
+# Binance UM Kline Parquet Materialization (Phases 6–12)
 
 > How the immutable raw zip archive produced by
 > `datahub.ingestion.binance_um_klines` is materialized into
@@ -32,8 +32,7 @@ The materializer currently supports:
 - `15m` from Phase 9.
 - `5m` from Phase 10.
 - `3m` from Phase 11.
-
-Other raw intervals (`1m`) remain future materialization work.
+- `1m` from Phase 12.
 
 Materialized dataset IDs:
 
@@ -43,6 +42,13 @@ Materialized dataset IDs:
 - `market.binance.um.klines.15m.parquet`
 - `market.binance.um.klines.5m.parquet`
 - `market.binance.um.klines.3m.parquet`
+- `market.binance.um.klines.1m.parquet`
+
+Phase 12 produced the 1m Parquet materialization at
+`local_data/binance_um_klines/interval=1m/parquet/` with `FULL_OUTPUT`,
+`raw_discovered_symbol_count = 922`, `symbol_count = 922`,
+`row_count = 918113837`, `file_count = 2667`, `failed_symbol_count = 0`, and
+`generated_csv_file_count = 0`.
 
 ---
 
@@ -60,7 +66,7 @@ python -m datahub.materialization.binance_um_klines_parquet \
 
 | Flag | Meaning |
 |------|---------|
-| `--interval 1d|4h|1h|15m|5m|3m` | Materialized interval. Defaults to `1d`. |
+| `--interval 1d|4h|1h|15m|5m|3m|1m` | Materialized interval. Defaults to `1d`. |
 | `--all` | Materialize every verified symbol in the raw manifest. |
 | `--symbols S1 S2` | Materialize only selected symbols (`SAMPLE_OUTPUT`). |
 | `--raw-root` | Raw archive root. Default is `local_data/.../interval=<INTERVAL>/raw`. |
@@ -138,8 +144,10 @@ Interval-specific rules:
 | `15m` | `open_time % 900000 == 0`; `close_time = open_time + 899999` | At most 96 rows. |
 | `5m` | `open_time % 300000 == 0`; `close_time = open_time + 299999` | At most 288 rows. |
 | `3m` | `open_time % 180000 == 0`; `close_time = open_time + 179999` | At most 480 rows. |
+| `1m` | `open_time % 60000 == 0`; `close_time = open_time + 59999` | At most 1440 rows. |
 
-`(symbol, date)` is a grouping field for `4h`, `1h`, `15m`, `5m`, and `3m`, not a unique key.
+`(symbol, date)` is a grouping field for `4h`, `1h`, `15m`, `5m`, `3m`, and
+`1m`, not a unique key.
 
 ---
 
@@ -206,6 +214,7 @@ row-count regression against the coarser interval's manifest:
 - `15m` row_count must exceed `1h` row_count, and `15m / 1h >= 3.5`.
 - `5m` row_count must exceed `15m` row_count, and `5m / 15m >= 2.5`.
 - `3m` row_count must exceed `5m` row_count, and `3m / 5m >= 1.5`.
+- `1m` row_count must exceed `3m` row_count, and `1m / 3m >= 2.5`.
 
 These regression checks are skipped for sample fixtures and when the baseline
 interval manifest is absent. The production gate is
@@ -251,6 +260,6 @@ print(df)
 ## Future Phases
 
 PostgreSQL serving, live API updates, strategy / trading layers, and research
-workspace integration are outside Phase 11.
+workspace integration are outside Phase 12.
 
 Dependencies: `duckdb` for validation/querying and `pyarrow` for writing.

@@ -166,6 +166,19 @@ the full manifest field list and a minimal read example, and
 [docs/market_data_storage_policy.md](market_data_storage_policy.md) for the
 storage / commit policy.
 
+### Current 1m raw archive
+
+Phase 12 uses the existing 1m raw run manifest:
+
+```text
+local_data/binance_um_klines/interval=1m/manifests/manifest.json
+```
+
+The raw archive validation target passes for `interval=1m`. The local raw
+manifest records `symbol_count = 922`, `file_count = 658627`,
+`verified_count = 35822`, `failed_count = 0`, `checksum_failed_count = 0`,
+`missing_count = 0`, and coverage from `2019-12-31` through `2026-06-19`.
+
 ---
 
 ## Schema & primary key
@@ -191,8 +204,9 @@ identified by its open time for a given symbol and interval.
 
 ## Known gaps
 
-- Phase 5 verifies the **raw archive inventory + checksums** only. Row-level
-  normalization and Parquet materialization are deferred to **Phase 6**.
+- Raw archive inventory + checksums are validated before materialization.
+- Parquet materialization currently covers `1d`, `4h`, `1h`, `15m`, `5m`,
+  `3m`, and `1m`.
 - Full historical market data is **uncommitted** (lives under `local_data/`).
 - The dataset remains lifecycle `draft`; `contract_validated = false`.
 - Snapshot publication is deferred to a later phase.

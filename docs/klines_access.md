@@ -84,8 +84,10 @@ Interval rules:
 | `15m` | `market.binance.um.klines.15m.parquet` | `(symbol, date)` is a grouping field with at most 96 rows. |
 | `5m` | `market.binance.um.klines.5m.parquet` | `(symbol, date)` is a grouping field with at most 288 rows. |
 | `3m` | `market.binance.um.klines.3m.parquet` | `(symbol, date)` is a grouping field with at most 480 rows. |
+| `1m` | `market.binance.um.klines.1m.parquet` | `(symbol, date)` is a grouping field with at most 1440 rows. |
 
-For `4h`, `1h`, `15m`, `5m`, and `3m`, do not join or upsert by `(symbol, date)` alone.
+For `4h`, `1h`, `15m`, `5m`, `3m`, and `1m`, do not join or upsert by
+`(symbol, date)` alone.
 
 ---
 
@@ -105,6 +107,8 @@ row_count exceeding `1h` row_count (ratio `>= 3.5`). Phase 10 adds the same
 requirement for the 5m Parquet manifest, with `5m` row_count exceeding `15m`
 row_count (ratio `>= 2.5`). Phase 11 adds the same requirement for the 3m
 Parquet manifest, with `3m` row_count exceeding `5m` row_count (ratio `>= 1.5`).
+Phase 12 adds the same requirement for the 1m Parquet manifest, with `1m`
+row_count exceeding `3m` row_count (ratio `>= 2.5`).
 
 ---
 

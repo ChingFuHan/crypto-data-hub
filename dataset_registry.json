@@ -1,7 +1,7 @@
 {
     "registry_version": "v0.2.0",
     "description": "Authoritative, machine-readable index of all datasets in crypto-data-hub. A dataset is not real until it is registered here. dataset_registry.json is the single source of truth; DATA_CATALOG.md is a human-readable view derived from it. Field rules are defined in DATA_CONTRACT.md and docs/registry_standard.md.",
-    "updated_at": "2026-06-17",
+    "updated_at": "2026-06-21",
     "conventions": {
         "dataset_id_pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
         "dataset_id_recommended_form": "<domain>.<entity>.<granularity>  e.g. market.btc_usd.ohlcv_1h",
@@ -234,7 +234,7 @@
                 "code_version": "v0.6.0",
                 "params": {
                     "phase": "Phase 5 Binance USD-M Kline Historical Pipeline",
-                    "supported_intervals": ["1d", "4h", "1h", "15m", "5m", "1m"],
+                    "supported_intervals": ["1d", "4h", "1h", "15m", "5m", "3m", "1m"],
                     "first_production_interval": "1d",
                     "interval_variants": "market.binance.um.klines.<INTERVAL>",
                     "archive_package_sources": ["monthly", "daily"],
@@ -245,7 +245,7 @@
                     "checksum_policy": "Per-file SHA-256 checksums recorded in the local_data run manifest. No single committed content checksum: full historical market data is intentionally uncommitted and machine-specific.",
                     "known_coverage_gaps": [
                         "Full historical market data is not committed; it exists only under local_data/ on the machine that ran the pipeline.",
-                        "Row-level normalization and Parquet materialization are deferred to Phase 6; Phase 5 verifies raw archive inventory + checksums only."
+                        "Parquet materialization is available for 1D/4H/1H/15M/5M/3M/1M as local draft outputs; serving layers and snapshot publication are deferred to later phases."
                     ]
                 },
                 "generated_by": "datahub.ingestion.binance_um_klines",
@@ -589,6 +589,69 @@
             "tags": ["market", "binance", "usd_m_futures", "klines", "ohlcv", "parquet", "duckdb", "materialized"],
             "created_at": "2026-06-20T00:00:00Z",
             "updated_at": "2026-06-20T00:00:00Z"
+        },
+        {
+            "dataset_id": "market.binance.um.klines.1m.parquet",
+            "dataset_name": "Binance USD-M Futures Klines 1M (Parquet)",
+            "description": "DuckDB-queryable Hive-partitioned Parquet materialization of the Binance USD-M Futures 1M Kline raw archive.",
+            "version": "v0.1.0",
+            "status": "draft",
+            "owner": "data-platform",
+            "source": {
+                "type": "derived",
+                "reference": "market.binance.um.klines (Parquet materialization of the raw 1M zip archive)"
+            },
+            "timezone": "UTC",
+            "update_frequency": "daily",
+            "earliest_timestamp": "2019-12-31T00:00:00Z",
+            "latest_timestamp": "2026-06-19T00:00:00Z",
+            "schema_ref": "DATA_CONTRACT.md#contract-binance-usd-m-futures-klines",
+            "primary_key": ["symbol", "interval", "open_time"],
+            "lineage": {
+                "upstream": ["market.binance.um.klines"],
+                "transformation": "Parse verified raw 1M zip archives (positional CSV), normalize to a fixed schema, dedup on (symbol, interval, open_time) with daily-wins conflict policy, derive Asia/Taipei date, and write Hive-partitioned Parquet (symbol/year). symbol and year are exposed via Hive partitioning, not physical columns. CSV is transient; no persistent CSV is produced. Raw discovery found 922 symbols (the 921 baseline shared by 1D/4H/1H/15M/5M plus REUSDT, a perpetual listed after the previous phases); FULL_OUTPUT = symbol_count == raw_discovered_symbol_count (>= 921), not a hard 921."
+            },
+            "provenance": {
+                "code_version": "v0.13.0",
+                "params": {
+                    "phase": "Phase 12 Binance UM 1M Kline Parquet Materialization",
+                    "interval": "1m",
+                    "output_format": "parquet",
+                    "query_engine": "duckdb",
+                    "partition_layout": "symbol=<SYMBOL>/year=<YEAR>/part-000.parquet (Hive-style)",
+                    "partition_columns_policy": "symbol and year exposed via DuckDB hive_partitioning=true; omitted from physical parquet to avoid duplicate columns",
+                    "date_policy": "date derived from open_time_taipei (Asia/Taipei) calendar date; open_time_utc and open_time_taipei stored as naive timestamps",
+                    "time_policy": "open_time % 60000 == 0; close_time = open_time + 59999",
+                    "key_policy": "unique key=(symbol, interval, open_time); (symbol, date) is a grouping column with at most 1440 rows per day, not a unique key",
+                    "dedup_policy": "key=(symbol, interval, open_time); daily wins over monthly on conflict; identical bars deduplicated",
+                    "output_root": "local_data/binance_um_klines/interval=1m/parquet",
+                    "manifest": "local_data/binance_um_klines/interval=1m/parquet/manifests/materialization_manifest.json",
+                    "validation_command": "python -m datahub.validation --target binance-um-klines-parquet --interval 1m --manifest local_data/binance_um_klines/interval=1m/parquet/manifests/materialization_manifest.json",
+                    "generated_csv_file_count": 0,
+                    "output_scope": "FULL_OUTPUT",
+                    "raw_discovered_symbol_count": 922,
+                    "symbol_count": 922,
+                    "row_count": 918113837,
+                    "file_count": 2667,
+                    "failed_symbol_count": 0,
+                    "symbol_universe_note": "raw_discovered_symbol_count=922 = 921 baseline (1D/4H/1H/15M/5M) + REUSDT, a perpetual listed after previous phases (first 1m archive REUSDT-1m-2026-06-18.zip). New listing, not a data error; cross-interval research should take the symbol intersection.",
+                    "known_coverage_gaps": [
+                        "Materialized Parquet is not committed; it exists only under local_data/ on the machine that ran the pipeline.",
+                        "REUSDT exists in 1m (922 symbols) but not yet in the 921-symbol 1D/4H/1H/15M/5M layers; cross-interval joins should intersect symbols until older intervals are re-ingested.",
+                        "PostgreSQL serving layer, live API updater, and strategy/research workspace are deferred to later phases."
+                    ]
+                },
+                "generated_by": "datahub.materialization.binance_um_klines_parquet",
+                "checksum": ""
+            },
+            "snapshot": null,
+            "quality": {
+                "contract_validated": false,
+                "last_validated_at": null
+            },
+            "tags": ["market", "binance", "usd_m_futures", "klines", "ohlcv", "parquet", "duckdb", "materialized"],
+            "created_at": "2026-06-21T00:00:00Z",
+            "updated_at": "2026-06-21T00:00:00Z"
         }
     ]
 }
