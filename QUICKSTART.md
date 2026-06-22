@@ -2,10 +2,16 @@
 
 Fast path to becoming productive in `crypto-data-hub`.
 
-> **Current phase:** Phase 5 (Binance USD-M Kline Historical Pipeline) — a
-> parameterized Kline ingestion pipeline exists (first interval `1d`); large
-> market data lives under `local_data/` (uncommitted). Both datasets remain
-> lifecycle `draft`.
+> **Current state:** Phase 12 complete (`v0.13.0`). The Binance USD-M Futures
+> kline pipeline (raw ingestion → raw validation → Parquet materialization →
+> Parquet validation) is in place for every supported interval
+> (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`). Large market data lives under
+> `local_data/` (uncommitted). Both datasets remain lifecycle `draft`.
+>
+> **New machine / `local_data/` recovery?** Start from `INIT.md`, then
+> `planning/tasks/task_rebuild_all_klines.md` and
+> `planning/tasks/task_rebuild_all_klines_verify.md` — do **not** re-run
+> historical phase tasks (`task_v0.07` … `task_v0.13`).
 
 ---
 
@@ -39,7 +45,7 @@ work.
 
 ## 3. Check current state
 
-- Version: see `VERSION` (currently `v0.6.0`).
+- Version: see `VERSION` (currently `v0.13.0`).
 - What's done / what's next: see `AGENTS.md`.
 - Why things are the way they are: see `HANDOFF.md`.
 
@@ -79,6 +85,13 @@ python -m unittest discover tests
 
 If your environment exposes only `python3`, use `python3 -m ...`.
 
+> **Validation scope:** `python -m datahub.validation --all` is **clone-safe
+> global validation** (registry/governance + any local kline manifest). It is
+> **not** proof that every interval's `local_data/` has been rebuilt and
+> validated. Full all-interval `local_data/` validation must follow
+> `planning/tasks/task_rebuild_all_klines_verify.md`, which checks each interval
+> (raw + Parquet) explicitly.
+
 ## 7. Run Universe Metadata ingestion
 
 Online source fetch + normalize + validate:
@@ -109,23 +122,31 @@ Current artifact locations:
 Committed data artifacts are intentionally small reference artifacts for offline
 validation.
 
-## 8. Run Binance USD-M Kline ingestion (Phase 5)
+## 8. Run the Binance USD-M Kline pipeline
 
-Parameterized by Kline interval (`1d`/`4h`/`1h`/`15m`/`5m`/`1m`); first
-production interval is `1d`. Large market data goes to `local_data/`
-(**uncommitted**).
+Parameterized by Kline interval (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`); nothing
+hard-codes a single interval. Large market data (raw archives + Parquet) goes to
+`local_data/` (**uncommitted**). Per interval the flow is raw ingestion → raw
+validation → Parquet materialization → Parquet validation.
 
 ```bash
-# inspect first, then download (resumable):
+# 1. inspect, then download raw archives (resumable):
 python -m datahub.ingestion.binance_um_klines --interval 1d --discover
 python -m datahub.ingestion.binance_um_klines --interval 1d --dry-run
 python -m datahub.ingestion.binance_um_klines --interval 1d --all --workers 16
 python -m datahub.ingestion.binance_um_klines --interval 1d --resume --all
 
-# validate a run manifest (explicit; not part of clone-safe --all):
+# 2. validate the raw run manifest (explicit; not part of clone-safe --all):
 python -m datahub.validation --target binance-um-klines --interval 1d \
   --manifest local_data/binance_um_klines/interval=1d/manifests/manifest.json
+
+# 3. materialize verified archives into partitioned Parquet:
+python -m datahub.materialization.binance_um_klines_parquet --interval 1d
 ```
+
+> For a full new-machine rebuild across **all** intervals, follow `INIT.md` and
+> `planning/tasks/task_rebuild_all_klines.md` rather than running intervals by
+> hand, then verify with `planning/tasks/task_rebuild_all_klines_verify.md`.
 
 See `docs/binance_um_klines_dataset.md` (pipeline + CLI),
 `docs/research_agent_klines_access.md` (how to read the data), and

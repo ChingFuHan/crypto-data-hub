@@ -5,6 +5,52 @@
 
 ---
 
+## Current State (v0.13.0 — Phase 12 complete)
+
+> **Read this first.** Everything from **Historical Context** onward is the
+> original Phase 0–5 handoff, preserved verbatim as a decision record. This
+> section is the authoritative summary of where the repo is now.
+
+- Version `v0.13.0`; `registry_version` stays `v0.2.0` (registry contract shape
+  unchanged).
+- The Binance USD-M Futures kline pipeline is complete for **every supported
+  interval** (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`). Per interval the flow is:
+  raw ingestion → raw validation → **Parquet materialization** → Parquet
+  validation.
+- Phases 6–12 (`v0.7.0`–`v0.13.0`) delivered the Parquet materialization layer
+  that the Phase 5 decision log below lists as future "Phase 6" work — that work
+  is now done. See `CHANGELOG.md` for the per-phase history.
+- Materialization CLI:
+  `python -m datahub.materialization.binance_um_klines_parquet --interval <I>`
+  (module `datahub/materialization/binance_um_klines_parquet.py`); Parquet
+  validation runs under `python -m datahub.validation`. Large market data (raw
+  archives **and** Parquet) lives under
+  `local_data/binance_um_klines/interval=<I>/` and is never committed.
+- Both datasets remain lifecycle `draft`; `market.binance.um.klines` now has
+  validated raw **and** Parquet layers (`contract_validated = false`).
+- **New machine / `local_data/` disaster recovery starts from `INIT.md`**, then
+  `planning/tasks/task_rebuild_all_klines.md` (rebuild) and
+  `planning/tasks/task_rebuild_all_klines_verify.md` (verify) — **not** by
+  re-running historical phase tasks.
+- `python -m datahub.validation --all` is clone-safe global validation and does
+  **not** prove every interval's `local_data/` is rebuilt; full all-interval
+  validation follows the verify task above, interval by interval.
+
+---
+
+## Historical Context — Phases 0–5 (preserved decision record)
+
+> Everything below this line — Architecture Overview, the Phase 0–5 decision log
+> (D1–D54), Artifact Locations, Validation Result, Known Gaps, Open Questions,
+> Pending Work, and Future Recommendations — is the **original Phase 0–5
+> handoff**, describing the repo as of `v0.6.0`. It is preserved as a historical
+> decision record and intentionally **not** rewritten. Where it lists
+> Parquet/normalization as future "Phase 6" work, that work has since shipped
+> across Phases 6–12 (`v0.7.0`–`v0.13.0`); the **Current State** section above is
+> authoritative.
+
+---
+
 ## Architecture Overview
 
 `crypto-data-hub` is a documentation-first, governance-driven crypto data

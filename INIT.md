@@ -177,23 +177,23 @@ local_data 必須保持 untracked。
 
     python -m pip install --upgrade pip
 
-依照 repo 現有 dependency file 安裝套件：
+安裝 runtime 依賴。依賴宣告在 repo 根目錄 `requirements.txt`
+（目前流程只需要 `duckdb` 與 `pyarrow`；其餘皆使用 Python 標準函式庫）：
 
-    if [ -f requirements.txt ]; then
-      pip install -r requirements.txt
-    fi
+    python -m pip install -r requirements.txt
 
-    if [ -f pyproject.toml ] || [ -f setup.py ]; then
-      pip install -e .
-    fi
+若日後 repo 改用 `pyproject.toml` 或 `setup.py` packaging：
 
-若找不到任何 dependency / packaging file：
+    python -m pip install -e .
+
+若連 `requirements.txt` 都不存在（非預期狀態）：
 
     停止
     回報 repo 根目錄檔案列表
     不自行建立 dependency file
 
-初始化階段不要新增 dependency file。
+初始化階段不要新增 dependency file（依賴宣告由 repo 維護者在正常開發流程更新，
+不在新機器初始化時新增）。
 
 ---
 
@@ -307,6 +307,15 @@ rebuild 完成後，讀取並執行：
     validation --all
     git safety
     disk report
+
+注意 validation 語意：
+
+    python -m datahub.validation --all 是 clone-safe global validation
+    （registry / governance + 若本地存在則驗證 kline manifest）。
+    它「不」代表已驗證所有 interval 的 local_data。
+    完整 all-interval local_data 驗證必須依照
+    planning/tasks/task_rebuild_all_klines_verify.md，逐 interval（raw + parquet）
+    明確檢查。不要把 validation --all 的通過當成全 interval 已驗證。
 
 Resume idempotency policy：
 

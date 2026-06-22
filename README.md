@@ -4,8 +4,9 @@ A long-term maintainable **crypto data platform repository** — the single,
 unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
-> **Status:** Phase 5 (Binance USD-M Kline Historical Pipeline) — complete, awaiting review.
-> **Version:** `v0.6.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> **Status:** Phase 12 complete — Binance UM Kline Parquet materialization for
+> every supported interval (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`).
+> **Version:** `v0.13.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -30,7 +31,8 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.6.0)
+├── VERSION                 # Semantic version (v0.13.0)
+├── INIT.md                 # New-machine / disaster-recovery entrypoint
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -48,6 +50,7 @@ crypto-data-hub/
 │
 ├── datahub/                # Core platform package
 │   ├── ingestion/          # Universe Metadata + Binance Kline ingestion
+│   ├── materialization/    # Binance Kline → partitioned Parquet
 │   └── validation/         # Executable validation framework
 ├── data/                   # Small committed reference artifacts
 ├── local_data/             # Large market data (Kline archives) — git-ignored
@@ -88,6 +91,18 @@ python -m datahub.validation --all
 python -m datahub.ingestion.universe_metadata --offline --all
 python -m unittest discover tests
 ```
+
+> **Validation scope:** `python -m datahub.validation --all` is **clone-safe
+> global validation** (registry/governance + any local kline manifest). It does
+> **not** prove that every interval's `local_data/` has been rebuilt and
+> validated. Full all-interval `local_data/` validation follows
+> [`planning/tasks/task_rebuild_all_klines_verify.md`](planning/tasks/task_rebuild_all_klines_verify.md).
+
+**New machine or `local_data/` recovery?** Start from [`INIT.md`](INIT.md), then
+[`planning/tasks/task_rebuild_all_klines.md`](planning/tasks/task_rebuild_all_klines.md)
+(rebuild) and
+[`planning/tasks/task_rebuild_all_klines_verify.md`](planning/tasks/task_rebuild_all_klines_verify.md)
+(verify) — do **not** re-run historical phase tasks.
 
 ---
 

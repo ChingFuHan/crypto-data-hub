@@ -1,0 +1,15 @@
+# Runtime dependencies for crypto-data-hub.
+#
+# Only third-party packages actually imported by datahub/ are listed; every
+# other part of the pipeline uses the Python standard library (argparse,
+# urllib, hashlib, zipfile, json, xml, concurrent.futures, ...).
+#
+# duckdb  - Parquet query engine for kline materialization and Parquet
+#           validation (datahub/materialization/binance_um_klines_parquet.py,
+#           datahub/validation/binance_um_klines_parquet.py).
+# pyarrow - Parquet writer for kline materialization
+#           (datahub/materialization/binance_um_klines_parquet.py).
+#
+# Unpinned: the repo records no compatibility constraint on these packages.
+duckdb
+pyarrow
