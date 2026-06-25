@@ -5,36 +5,98 @@
 
 ---
 
-## Current State (v0.13.0 — Phase 12 complete)
+## Current State (v0.14.0 — Phase 12 + Live Update Phases 1–8)
 
 > **Read this first.** Everything from **Historical Context** onward is the
 > original Phase 0–5 handoff, preserved verbatim as a decision record. This
 > section is the authoritative summary of where the repo is now.
 
-- Version `v0.13.0`; `registry_version` stays `v0.2.0` (registry contract shape
-  unchanged).
-- The Binance USD-M Futures kline pipeline is complete for **every supported
-  interval** (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`). Per interval the flow is:
-  raw ingestion → raw validation → **Parquet materialization** → Parquet
-  validation.
-- Phases 6–12 (`v0.7.0`–`v0.13.0`) delivered the Parquet materialization layer
-  that the Phase 5 decision log below lists as future "Phase 6" work — that work
-  is now done. See `CHANGELOG.md` for the per-phase history.
+- Version `v0.14.0`; `registry_version` stays `v0.2.0` (registry contract shape
+  unchanged — no dataset was registered in `v0.14.0`).
+- The Binance USD-M Futures kline **historical** pipeline is complete for
+  **every supported interval** (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`). Per
+  interval the flow is: raw ingestion → raw validation → **Parquet
+  materialization** → Parquet validation. Historical materialization
+  (Phases 6–12, `v0.7.0`–`v0.13.0`) is the **stable main line** and is
+  unchanged by live update.
+- **Live Update Phases 1–8 are complete as MVP primitives** (`v0.14.0`) — an
+  incremental live-update layer on top of the historical pipeline:
+  WebSocket-first / REST-fallback / webhook primitives, a current historical
+  dataset, state-driven startup backfill, CLI modes, and continuity /
+  validation checks. This is a **tested CLI skeleton**, not a
+  production-hardened long-running daemon.
+  - Phase 1 — primitives (`KlineRecord`, path resolution, base data
+    structures) in `datahub/live_update.py`.
+  - Phase 2 — current historical dataset init from the seed Parquet + live
+    Kbar Parquet merge at
+    `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/`.
+  - Phase 3 — `live_update_state.json` + state-driven startup backfill
+    planning.
+  - Phase 4 — REST backfill / fallback / gap repair against
+    `https://fapi.binance.com/fapi/v1/klines` with 429/418/5xx/timeout
+    backoff.
+  - Phase 5 — WebSocket manager, combined stream parsing, stream batching,
+    stale detection, reconnect.
+  - Phase 6 — webhook server (`POST /webhook/kline`, `GET /healthz`).
+  - Phase 7 — CLI modes via `scripts/live_update.py` (thin wrapper over
+    `datahub.live_update.main`): `--interval all|1m|3m|5m|15m|1h|4h|1d`,
+    `--symbols`, `--symbols-file`, `--once`, `--check-continuity`,
+    `--describe-layout`, `--describe-websocket-connections`,
+    `--describe-webhook-server`, route-disable flags. `all` is CLI expansion
+    only; never sent to the Binance API.
+  - Phase 8 — `--check-continuity` (duplicate / missing / misaligned
+    `open_time`), shared Kbar validation (OHLC, time alignment, volume/taker
+    bounds) with `rejects` logging, and live-update validation tests.
+- **Data paths (live update):** current historical dataset (research-agent
+  default read-only entry) at
+  `local_data/binance_um_klines_current/`; runtime buffers / state / latest /
+  closed_buffer / rejects at `local_data/live_update/`. Both are git-ignored
+  runtime data, never committed.
+- **Live-update namespaces are NOT registered.**
+  `market.binance.um.klines.current` (derived current dataset) and
+  `market.binance.um.klines.live_update` (runtime operational namespace) are
+  pending governance decisions; see `DATA_CONTRACT.md` → *Pending Governance
+  Decisions*. Do not register them without a complete lifecycle design.
 - Materialization CLI:
   `python -m datahub.materialization.binance_um_klines_parquet --interval <I>`
   (module `datahub/materialization/binance_um_klines_parquet.py`); Parquet
   validation runs under `python -m datahub.validation`. Large market data (raw
   archives **and** Parquet) lives under
   `local_data/binance_um_klines/interval=<I>/` and is never committed.
-- Both datasets remain lifecycle `draft`; `market.binance.um.klines` now has
-  validated raw **and** Parquet layers (`contract_validated = false`).
+- Both registered datasets remain lifecycle `draft`; `market.binance.um.klines`
+  now has validated raw **and** Parquet layers (`contract_validated = false`).
 - **New machine / `local_data/` disaster recovery starts from `INIT.md`**, then
   `planning/tasks/task_rebuild_all_klines.md` (rebuild) and
   `planning/tasks/task_rebuild_all_klines_verify.md` (verify) — **not** by
   re-running historical phase tasks.
+- **Live-update tasks start from `LIVE_UPDATE.md`** (then
+  `docs/live_update/*.md`), not `INIT.md` or historical phase tasks.
 - `python -m datahub.validation --all` is clone-safe global validation and does
   **not** prove every interval's `local_data/` is rebuilt; full all-interval
   validation follows the verify task above, interval by interval.
+
+### Recommended next actions (post Live Update Phase 8)
+
+> Proposals only — stop at the phase boundary and wait for review. The next
+> step is **not** to keep adding features; it is to validate and harden.
+
+1. **Small-scope validation** — single interval (`1m`) + few symbols
+   (`BTCUSDT ETHUSDT`) via `--describe-*` / `--check-continuity` / `--once`
+   before any full-market / all-interval deployment.
+2. **Registry governance decision** — decide whether
+   `market.binance.um.klines.current` is a registered derived dataset and
+   whether `market.binance.um.klines.live_update` is a runtime operational
+   namespace only; then update `dataset_registry.json`, `DATA_CATALOG.md`, and
+   `DATA_CONTRACT.md` in the same change.
+3. **Production long-running daemon hardening** — orchestration, retention
+   manager, and long-running reliability (the MVP CLI skeleton is not a
+   production daemon).
+4. **CI validation for live-update paths.**
+5. **Current dataset partial-initialization hardening remains pending:**
+    when `current_root` has Parquet but the initialized marker is missing, the
+    runtime must avoid falsely reporting `already_initialized`; it needs
+    partial-copy detection, marker semantics, and a current-dataset integrity
+    check.
 
 ---
 

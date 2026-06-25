@@ -5,8 +5,10 @@ unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 **Snapshot**, and **Documentation**.
 
 > **Status:** Phase 12 complete — Binance UM Kline Parquet materialization for
-> every supported interval (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`).
-> **Version:** `v0.13.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
+> every supported interval (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`). **Live Update
+> Phases 1–8** (MVP primitives) complete — see
+> [Live Update](#live-update-mvp-primitives) below.
+> **Version:** `v0.14.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
 ---
 
@@ -31,8 +33,9 @@ crypto-data-hub/
 ├── HANDOFF.md              # Architecture + decisions
 ├── README.md               # This file
 ├── QUICKSTART.md           # Fast path to getting started
-├── VERSION                 # Semantic version (v0.13.0)
+├── VERSION                 # Semantic version (v0.14.0)
 ├── INIT.md                 # New-machine / disaster-recovery entrypoint
+├── LIVE_UPDATE.md          # Live update task entrypoint (Phases 1–8 MVP)
 ├── CHANGELOG.md            # Human-readable change history
 │
 ├── DATA_CATALOG.md         # Data Catalog Framework — derived view
@@ -46,15 +49,17 @@ crypto-data-hub/
 │   ├── authority_model.md      # Authority + sync + update model
 │   ├── naming_convention.md    # Naming rules
 │   ├── universe_metadata_dataset.md  # First dataset design (Phase 2)
-│   └── validation_framework.md       # Validation framework (Phase 3)
+│   ├── validation_framework.md       # Validation framework (Phase 3)
+│   └── live_update/            # Live update per-module specs (Phases 1–8)
 │
 ├── datahub/                # Core platform package
 │   ├── ingestion/          # Universe Metadata + Binance Kline ingestion
 │   ├── materialization/    # Binance Kline → partitioned Parquet
+│   ├── live_update.py      # Live update runtime (Phases 1–8 MVP)
 │   └── validation/         # Executable validation framework
 ├── data/                   # Small committed reference artifacts
-├── local_data/             # Large market data (Kline archives) — git-ignored
-├── scripts/                # Automation scripts
+├── local_data/             # Large market data + live runtime — git-ignored
+├── scripts/                # Automation scripts (incl. live_update.py wrapper)
 ├── tests/                  # Test suite and fixtures
 ├── reports/                # Generated reports (future)
 ├── examples/               # Usage examples (future)
@@ -63,6 +68,57 @@ crypto-data-hub/
 
 Large market data (Binance Kline archives) lives under `local_data/` and is
 **never committed** — see [`docs/market_data_storage_policy.md`](docs/market_data_storage_policy.md).
+
+---
+
+## Live Update MVP Primitives
+
+> **Historical materialization is the stable main line** (Phases 6–12,
+> unchanged). Live update is an incremental layer on top of it.
+
+**Live Update Phases 1–8 are complete as MVP primitives.** This delivers a
+tested CLI skeleton and validation checks — **not** a production-hardened
+long-running daemon.
+
+- **Task entrypoint:** [`LIVE_UPDATE.md`](LIVE_UPDATE.md) (read this first for
+  any live-update task; do not rely on README/AGENTS alone).
+- **Per-module specs:** [`docs/live_update/`](docs/live_update/)
+  (`00_OVERVIEW.md` … `09_RUNBOOK.md`).
+- **CLI:** `scripts/live_update.py` (thin wrapper over `datahub.live_update`).
+- **Current historical dataset** (research-agent default read-only entry
+  point): `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/`.
+- **Runtime buffers / state / latest / closed_buffer / rejects:**
+  `local_data/live_update/`.
+- **Phase 1–8 scope:** primitives → current dataset init + Parquet merge →
+  state + startup backfill planning → REST backfill → WebSocket primitives →
+  webhook primitives → CLI modes → continuity / validation checks.
+
+**Production long-running, full-market, all-interval daemon hardening is
+pending.** Orchestration, retention manager, and long-running reliability work
+remains future work. Do **not** deploy a full-market / all-interval
+long-running daemon without first completing small-scope validation.
+
+### Small-scope validation (recommended first run)
+
+Use a single interval (`1m`) and a small symbol set (`BTCUSDT ETHUSDT`). All
+output is git-ignored runtime data under `local_data/` — never commit it.
+
+```bash
+.venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --describe-layout
+.venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --describe-websocket-connections
+.venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --describe-webhook-server
+.venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --check-continuity
+.venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --once
+```
+
+> `--interval all` is a CLI expansion semantic only and is **never** sent to
+> the Binance API. Unclosed Kbars must never enter `closed_buffer` or the
+> current dataset. WebSocket / REST / webhook share one Kbar validation path.
+
+> **Registry note:** `market.binance.um.klines.current` and
+> `market.binance.um.klines.live_update` are **not yet registered** in
+> `dataset_registry.json` — pending governance decisions (see
+> [`DATA_CONTRACT.md`](DATA_CONTRACT.md) → *Pending Governance Decisions*).
 
 ---
 

@@ -407,3 +407,32 @@ from the Binance Data Vision public archive and materialized by interval.
 - **Snapshot policy:** snapshots are deferred until a future phase publishes an
   immutable, content-addressable materialization (`ROOT.md` -> *Snapshot
   Principles*); current raw and Parquet artifacts are local draft outputs.
+
+---
+
+## Pending Governance Decisions — Live Update (v0.14.0)
+
+> **Not yet registered.** The live-update layer (Phases 1–8) introduces two
+> new data namespaces that are **deliberately not** registered in
+> `dataset_registry.json` yet. Their formal lifecycle / contract / provenance
+> design is incomplete, so registering them now would violate *Contract before
+> trust* and the registry integrity rules. These are pending governance
+> decisions, not implemented datasets.
+
+| Candidate dataset_id | Proposed role | Status |
+|----------------------|---------------|--------|
+| `market.binance.um.klines.current` | Derived dataset: the research-agent default read-only entry point, initialized from the historical seed Parquet and continuously merged with live closed Kbars. Lives at `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/`. | **Pending decision** — whether to register as a formal derived dataset (with full schema_ref, primary_key, provenance, lifecycle, and snapshot policy) is deferred until the live-update lifecycle design is complete. |
+| `market.binance.um.klines.live_update` | Runtime operational namespace: WebSocket / REST / webhook buffers, `latest`, `closed_buffer`, `state`, `rejects`. Lives at `local_data/live_update/`. | **Pending decision** — whether this is only a runtime operational namespace (not a registered dataset) or becomes a registered operational/audit dataset is deferred. |
+
+### Rules until decided
+
+- Neither namespace is a registered dataset; do **not** treat either as
+  `active` or `contract_validated`.
+- Both live under `local_data/` and are **never committed** (git-ignored
+  runtime data).
+- The existing registered Kline family (`market.binance.um.klines` and the
+  `market.binance.um.klines.<INTERVAL>.parquet` variants) is unchanged and
+  remains the authoritative historical materialization.
+- When the governance decision is made, it must update
+  `dataset_registry.json`, `DATA_CATALOG.md`, and this document in the same
+  change (`AGENTS.md` → *Operating Rules*).

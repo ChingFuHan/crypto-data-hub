@@ -27,6 +27,53 @@ docs/live_update/09_RUNBOOK.md
 
 ---
 
+## 0. 目前狀態（v0.14.0）
+
+> **先讀此區。** 本節說明 live update 目前實際完成的範圍，避免把規格
+> 誤讀成「production long-running daemon 已完成」。
+
+- **Live Update Phase 1~8 MVP primitives complete。** 各 Phase 對應：
+  - Phase 1 — primitives（`KlineRecord`、路徑解析、base 資料結構）
+  - Phase 2 — current historical dataset 初始化 + Parquet merge
+  - Phase 3 — state 管理與 startup backfill 規劃
+  - Phase 4 — REST backfill / fallback / gap repair
+  - Phase 5 — WebSocket manager、combined stream、batching、stale、reconnect
+  - Phase 6 — webhook server
+  - Phase 7 — CLI 整合與模式切換
+  - Phase 8 — continuity check / validation checks / tests
+- **CLI skeleton and validation checks complete。** `scripts/live_update.py`
+  已存在並支援 `--interval all|1m|3m|5m|15m|1h|4h|1d`、`--symbols`、`--once`、
+  `--check-continuity`、`--describe-layout`、`--describe-websocket-connections`、
+  `--describe-webhook-server` 等模式。`all` 僅為 CLI 展開語意，絕不傳給
+  Binance API。
+- **Production long-running orchestration hardening pending。** Phase 1~8 是
+  MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
+  daemon。orchestration、retention manager、長時間全市場 all-interval 部署
+  的可靠性驗證尚未完成。
+- **Full-market all-interval long-running deployment 應在小範圍驗收後再
+  測。** 先用單一 interval（如 `1m`）+ 少量 symbols（如 `BTCUSDT ETHUSDT`）
+  跑 `--describe-*` / `--check-continuity` / `--once` 驗收，通過後再考慮擴大
+  範圍。
+- **Historical materialization 仍是穩定主線。** Phase 6~12 的 Binance USD-M
+  Futures Kline Parquet materialization 不受 live update 影響，仍是既有穩定
+  主線；live update 是在其之上的增量更新層。
+- **Registry 未變。** `market.binance.um.klines.current` 是否註冊為正式
+  derived dataset、`market.binance.um.klines.live_update` 是否僅為 runtime
+  operational namespace，為 pending governance decision，尚未寫入
+  `dataset_registry.json`。
+
+### 不可違反的底線
+
+```text
+不得 commit local_data、parquet、jsonl runtime artifacts。
+不得把 --interval all 當成 Binance API interval 傳給 REST / WebSocket。
+不得讓未收盤 KBar 進入 closed_buffer 或 current historical dataset。
+WebSocket / REST / webhook 三條 live route 必須共用同一套 Kbar validation。
+state.last_closed_open_time 只能在 current dataset flush 成功後更新。
+```
+
+---
+
 ## 1. 任務目標
 
 建立：

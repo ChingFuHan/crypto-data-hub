@@ -7,28 +7,52 @@
 
 ## Current Phase
 
-**Phase 12 complete — Binance UM Kline Parquet Materialization.** Version
-`v0.13.0`.
+**Phase 12 complete — Binance UM Kline Parquet Materialization** (historical
+main line, `v0.13.0`). **Live Update Phases 1–8 complete — MVP primitives**
+(`v0.14.0`). Version `v0.14.0`.
 
-The Binance USD-M Futures kline pipeline (raw ingestion → raw validation →
-Parquet materialization → Parquet validation) is in place for every supported
-interval: `1d`, `4h`, `1h`, `15m`, `5m`, `3m`, `1m`.
+The Binance USD-M Futures kline historical pipeline (raw ingestion → raw
+validation → Parquet materialization → Parquet validation) is in place for
+every supported interval: `1d`, `4h`, `1h`, `15m`, `5m`, `3m`, `1m`, and
+remains the stable main line. **Live Update Phases 1–8** add an incremental
+live-update layer on top of it: WebSocket-first / REST-fallback / webhook
+primitives, a current historical dataset, state-driven startup backfill, CLI
+modes, and continuity / validation checks. This is **MVP primitives + a tested
+CLI skeleton**, not a production-hardened long-running daemon.
 
 Delivery model: Architecture First → MVP First → Incremental Delivery →
 Review Before Expansion. Each phase stops at its boundary for review; the repo
-sits at a reviewed Phase 12 boundary. The new-machine / recovery entrypoint is
-`INIT.md` (see below) — not a re-run of historical phase tasks.
+sits at a reviewed Phase 12 + Live Update Phase 8 boundary. The new-machine /
+recovery entrypoint is `INIT.md` (historical rebuild) and the live-update task
+entrypoint is `LIVE_UPDATE.md` — not a re-run of historical phase tasks.
 
 ---
 
 ## Current Status
 
-- Repo version: `v0.13.0`. `registry_version` stays `v0.2.0` because the
-  registry contract shape has not changed (dataset entries were added, not new
-  fields).
+- Repo version: `v0.14.0`. `registry_version` stays `v0.2.0` because the
+  registry contract shape has not changed (no dataset was registered in
+  `v0.14.0`; live-update namespaces are pending governance decisions).
 - Phases 0 (`v0.1.0`) through 12 (`v0.13.0`) are complete. The Binance USD-M
   Futures Kline pipeline is fully built and materialized to Parquet for every
   supported interval (`1d`/`4h`/`1h`/`15m`/`5m`/`3m`/`1m`).
+- **Live Update Phases 1–8 (`v0.14.0`) are complete as MVP primitives** —
+  WebSocket-first / REST-fallback / webhook primitives, current historical
+  dataset init + Parquet merge, state + startup backfill, CLI modes, and
+  continuity / validation checks. See `LIVE_UPDATE.md` and
+  `docs/live_update/*.md`. This is a tested CLI skeleton, **not** a
+  production-hardened long-running daemon.
+  - Live-update CLI — `scripts/live_update.py` (thin wrapper over
+    `datahub.live_update.main`); supports `--interval all|1m|3m|5m|15m|1h|4h|1d`,
+    `--symbols`, `--symbols-file`, `--once`, `--check-continuity`,
+    `--describe-layout`, `--describe-websocket-connections`,
+    `--describe-webhook-server`, and route-disable flags. `all` is a CLI
+    expansion semantic only and is never sent to the Binance API.
+  - Current historical dataset (research-agent default read-only entry point)
+    lives at `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/`.
+  - Runtime buffers / state / latest / closed_buffer / rejects live under
+    `local_data/live_update/`. Both are git-ignored runtime data, never
+    committed.
 - Per interval the executable flow is: raw ingestion → raw validation →
   Parquet materialization → Parquet validation.
   - Raw ingestion CLI —
@@ -48,16 +72,23 @@ sits at a reviewed Phase 12 boundary. The new-machine / recovery entrypoint is
   - Validation targets `binance-um-klines` (raw) and the Parquet layer take an
     explicit `--manifest`; clone-safe `--all` skips them when no `local_data`
     manifest exists.
-- Both datasets remain lifecycle `draft`:
+- Both registered datasets remain lifecycle `draft`:
   - `reference.universe.metadata` — `active_current` coverage.
   - `market.binance.um.klines` — raw archive inventory/checksums **and**
     materialized Parquet are validated; `contract_validated = false`.
+- **Live-update namespaces are NOT registered** —
+  `market.binance.um.klines.current` (derived current dataset) and
+  `market.binance.um.klines.live_update` (runtime operational namespace) are
+  pending governance decisions; see `DATA_CONTRACT.md` → *Pending Governance
+  Decisions* and the *Live Update Agent Guidance* section below.
 - Module execution entry points:
   - `python -m datahub.ingestion.binance_um_klines --interval 1d --all`
   - `python -m datahub.materialization.binance_um_klines_parquet --interval 1d`
   - `python -m datahub.ingestion.universe_metadata --offline --all`
   - `python -m datahub.validation --all`
   - `python -m unittest discover tests`
+  - Live update: `.venv/bin/python scripts/live_update.py --interval <I> ...`
+    (see `LIVE_UPDATE.md`)
 
 ---
 
@@ -75,6 +106,9 @@ how each interval was delivered; they are **not** the new-machine recovery
 entrypoint. To rebuild `local_data/` on a new machine, follow
 `INIT.md` → rebuild task → verify task.
 
+For **live-update** tasks, the entrypoint is `LIVE_UPDATE.md` (see *Live Update
+Agent Guidance* below), not `INIT.md` or historical phase tasks.
+
 ---
 
 ## Validation Scope (important)
@@ -90,6 +124,66 @@ Full all-interval `local_data/` validation must follow
 
 ---
 
+## Live Update Agent Guidance
+
+> **Read this before any live-update task.** Live update has its own entrypoint
+> and per-module specs; it is not covered by the historical-pipeline docs.
+
+- **Task entrypoint:** `LIVE_UPDATE.md` is the live-update task entrypoint. Any
+  task that touches live update **must** read `LIVE_UPDATE.md` first — reading
+  only `README.md` or `AGENTS.md` is insufficient.
+- **Per-module specs:** `docs/live_update/*.md`
+  (`00_OVERVIEW.md` … `09_RUNBOOK.md`) are the live-update分卷規格. Read the
+  relevant volume for the module you are changing; do not guess from the
+  overview alone.
+- **Current completion:** Live Update Phases 1–8 are complete as MVP
+  primitives (CLI skeleton + validation checks). Production long-running
+  daemon hardening is **pending** — do not claim live update is
+  production-ready.
+- **Historical materialization is the stable main line.** Live update is an
+  incremental layer on top of it; do not break the historical pipeline.
+
+### Data paths (live update)
+
+- **Current historical dataset** (research-agent default read-only entry
+  point): `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/`.
+- **Runtime buffers / state / latest / closed_buffer / rejects:**
+  `local_data/live_update/`.
+- **Historical seed Parquet:** `local_data/binance_um_klines/interval=<INTERVAL>/parquet/`.
+
+### Hard rules (live update)
+
+- **Do not commit** `local_data/`, Parquet, or JSONL runtime artifacts. They
+  are git-ignored runtime data. Confirm `git status --short` before every
+  commit.
+- **Do not treat `--interval all` as a Binance API interval.** `all` is a CLI
+  expansion semantic only; expand it to the supported interval tuple before
+  any REST / WebSocket call. Never send `all` to Binance.
+- **No unclosed Kbar may enter `closed_buffer` or the current dataset.**
+  Unclosed bars update `latest` / buffers only; only closed Kbars
+  (`is_closed = true`) are written to `closed_buffer` and the partition write
+  queue.
+- **WebSocket / REST / webhook share one Kbar validation path.** All three
+  live routes must pass the same Kbar validation (OHLC, time alignment,
+  volume/taker bounds); failures go to `rejects`.
+- **`state.last_closed_open_time` is updated only after a successful current
+  dataset flush**, never after merely buffering a closed Kbar.
+- **Research agents are read-only** against the current historical dataset by
+  default; they must not write to `local_data/live_update/` or the historical
+  seed Parquet unless a task explicitly requires audit / debug / replay.
+
+### Pending governance decisions (live update)
+
+- `market.binance.um.klines.current` — whether to register as a formal derived
+  dataset is pending (see `DATA_CONTRACT.md` → *Pending Governance Decisions*).
+- `market.binance.um.klines.live_update` — whether it is only a runtime
+  operational namespace or a registered dataset is pending.
+- **Do not register either in `dataset_registry.json` until the governance
+  decision is made**, and then update the registry, `DATA_CATALOG.md`, and
+  `DATA_CONTRACT.md` in the same change.
+
+---
+
 ## Current Priorities
 
 1. Keep `python -m datahub.validation --all` and `unittest discover tests`
@@ -98,6 +192,8 @@ Full all-interval `local_data/` validation must follow
 3. Never commit `local_data/`; confirm `git status --short` before every commit.
 4. Keep `dataset_registry.json` (authoritative) and `DATA_CATALOG.md` (derived)
    in sync — registry wins on any conflict.
+5. Do not break the historical materialization main line when touching live
+   update.
 
 ---
 
@@ -118,6 +214,18 @@ Full all-interval `local_data/` validation must follow
 3. Auto-generate `DATA_CATALOG.md` from the registry instead of hand-maintaining.
 4. Implement immutable, content-addressable snapshot publication.
 5. Add historical delist/rename/merge source ingestion for Universe Metadata.
+6. **Live update (post Phase 8 review):**
+   1. Small-scope validation (single interval + few symbols) before any
+      full-market deployment.
+   2. Decide the `market.binance.um.klines.current` /
+      `market.binance.um.klines.live_update` registry governance question.
+   3. Production long-running daemon hardening (orchestration, retention,
+      long-running reliability).
+   4. CI validation for live-update paths.
+   5. Current dataset partial-initialization hardening — when `current_root`
+      has Parquet but the initialized marker is missing, avoid falsely
+      reporting `already_initialized`; needs partial-copy detection, marker
+      semantics, and a current-dataset integrity check.
 
 ---
 
@@ -130,8 +238,9 @@ Full all-interval `local_data/` validation must follow
 | `HANDOFF.md` | Architecture, decisions, known issues, pending work. |
 | `README.md` | Project overview and structure. |
 | `QUICKSTART.md` | Fast path to getting started. |
-| `VERSION` | Current semantic version (`v0.13.0`). |
+| `VERSION` | Current semantic version (`v0.14.0`). |
 | `INIT.md` | New-machine / disaster-recovery entrypoint (rebuild + verify). |
+| `LIVE_UPDATE.md` | Live-update task entrypoint (Phases 1–8 MVP primitives). |
 | `CHANGELOG.md` | Human-readable history of changes. |
 | `DATA_CONTRACT.md` | Dataset Contract Framework — schema + quality rules. |
 | `DATA_CATALOG.md` | Data Catalog Framework — derived human-readable view. |
@@ -148,16 +257,18 @@ Full all-interval `local_data/` validation must follow
 |-----------|---------|
 | `datahub/ingestion/` | Universe Metadata + Binance Kline ingestion. |
 | `datahub/materialization/` | Binance Kline → partitioned Parquet materialization. |
+| `datahub/live_update.py` | Live update runtime (Phases 1–8 MVP primitives). |
 | `datahub/validation/` | Executable validation framework. |
 | `planning/tasks/` | Rebuild + verify tasks and historical phase task specs. |
 | `data/` | Small committed reference artifacts for offline validation. |
-| `local_data/` | Large market data (Kline archives) — **git-ignored, never committed**. |
-| `scripts/` | Automation and operational scripts. |
+| `local_data/` | Large market data + live-update runtime — **git-ignored, never committed**. |
+| `scripts/` | Automation and operational scripts (incl. `live_update.py` wrapper). |
 | `tests/` | Test suite and fixtures. |
 | `reports/` | Generated reports and quality outputs. |
 | `examples/` | Usage examples. |
 | `logs/` | Runtime logs (git-ignored content). |
 | `docs/` | Extended governance documentation. |
+| `docs/live_update/` | Live-update per-module specs (`00`…`09`). |
 
 ---
 

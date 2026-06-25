@@ -7,6 +7,74 @@ this project adheres to [Semantic Versioning](https://semver.org/) (`vMAJOR.MINO
 
 ---
 
+## [v0.14.0] — 2026-06-26
+
+### Added — Live Update Phases 1–8: MVP primitives
+
+> **Status note.** This version adds the live-update MVP primitives, CLI
+> skeleton, and validation checks. The historical materialization pipeline
+> (Phases 6–12) remains the stable main line and is unchanged. Live update is
+> **not** a production-hardened long-running daemon yet — see *Notes* below.
+
+- **Live update primitives (Phase 1)** — `KlineRecord` dataclass, path
+  resolution, and base data structures for the live-update runtime
+  (`datahub/live_update.py`).
+- **Current historical dataset init + Parquet merge (Phase 2)** — initializes
+  `local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/` from the
+  historical seed Parquet and merges live closed Kbars into the current
+  dataset.
+- **State + startup backfill planning (Phase 3)** — `live_update_state.json`
+  tracking and state-driven startup gap/backfill planning.
+- **REST backfill (Phase 4)** — REST fallback / startup backfill / gap repair
+  against `https://fapi.binance.com/fapi/v1/klines` with 429/418/5xx/timeout
+  backoff.
+- **WebSocket primitives (Phase 5)** — WebSocket manager, combined stream
+  parsing, stream batching, stale detection, and reconnect.
+- **Webhook primitives (Phase 6)** — webhook server
+  (`POST /webhook/kline`, `GET /healthz`) as an external bridge / agent
+  entry point.
+- **CLI modes (Phase 7)** — `scripts/live_update.py` (thin wrapper over
+  `datahub.live_update.main`) with `--interval all|1m|3m|5m|15m|1h|4h|1d`,
+  `--symbols`, `--symbols-file`, `--max-symbols`, `--once`, `--strict`,
+  `--check-continuity`, `--describe-layout`, `--describe-websocket-connections`,
+  `--describe-webhook-server`, and route-disable flags. `all` is a CLI
+  expansion semantic only and is never sent to the Binance API.
+- **Continuity / validation checks (Phase 8)** — `--check-continuity` reports
+  duplicate / missing / misaligned `open_time` per symbol+interval; Kbar
+  validation (OHLC, time alignment, volume/taker bounds) with `rejects`
+  logging; live-update validation tests under `tests/`.
+- **Current historical dataset path support** —
+  `local_data/binance_um_klines_current/` is the research-agent default
+  read-only entry point; runtime buffers / state / latest / closed_buffer /
+  rejects live under `local_data/live_update/`. Both are git-ignored runtime
+  data and are never committed.
+
+### Notes
+
+- **Live update is MVP primitives only.** Phases 1–8 deliver a tested CLI
+  skeleton and validation checks. A production long-running, full-market,
+  all-interval daemon has **not** been hardened — orchestration, retention,
+  and long-running reliability work remains future work.
+- **Small-scope validation first.** Before any full-market / all-interval
+  long-running deployment, validate with a small symbol set (e.g.
+  `BTCUSDT ETHUSDT`) and a single interval (e.g. `1m`) using the describe /
+  check-continuity / once CLI modes.
+- **Registry unchanged.** No new dataset was registered in
+  `dataset_registry.json`. Whether
+  `market.binance.um.klines.current` is registered as a formal derived dataset
+  and whether `market.binance.um.klines.live_update` is a runtime operational
+  namespace only are **pending governance decisions** (noted in
+  `DATA_CONTRACT.md` and `AGENTS.md`). `registry_version` stays `v0.2.0`.
+
+### Changed
+
+- Bumped repo version `v0.13.0` → `v0.14.0`.
+- Synced `README.md`, `AGENTS.md`, `HANDOFF.md`, `QUICKSTART.md`,
+  `LIVE_UPDATE.md`, and `DATA_CONTRACT.md` to reflect live-update Phase 1–8
+  status.
+
+---
+
 ## [v0.13.0] — 2026-06-21
 
 ### Added — Phase 12: Binance UM 1M Kline Parquet Materialization
