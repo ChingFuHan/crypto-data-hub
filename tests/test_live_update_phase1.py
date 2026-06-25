@@ -315,5 +315,206 @@ class ScriptPhase2Tests(unittest.TestCase):
             self.assertEqual(payload["results"][0]["status"], "bootstrap_required")
 
 
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 3 current dataset tests")
+class LiveUpdateStateTests(unittest.TestCase):
+    def test_state_save_load_uses_expected_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create(
+                "1m",
+                paths,
+                now_utc="2026-06-26T00:00:00Z",
+            )
+            lu.mark_symbol_buffered(
+                state,
+                "btcusdt",
+                1638747600000,
+                now_utc="2026-06-26T00:01:00Z",
+            )
+            path = lu.save_live_update_state(
+                state,
+                paths,
+                now_utc="2026-06-26T00:02:00Z",
+            )
+
+            self.assertEqual(path, paths.state_json("1m"))
+            self.assertTrue(path.exists())
+            self.assertFalse(path.with_name(path.name + ".tmp").exists())
+            loaded = lu.load_live_update_state("1m", paths)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.interval, "1m")
+            self.assertEqual(
+                loaded.symbols["BTCUSDT"].last_buffered_open_time,
+                1638747600000,
+            )
+            self.assertIsNone(loaded.symbols["BTCUSDT"].last_closed_open_time)
+
+    def test_flush_result_is_only_path_that_updates_closed_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+            rec = make_record(1638747600000)
+
+            lu.mark_symbol_buffered(state, "BTCUSDT", rec.open_time)
+            self.assertEqual(
+                state.symbols["BTCUSDT"].last_buffered_open_time,
+                rec.open_time,
+            )
+            self.assertIsNone(state.symbols["BTCUSDT"].last_closed_open_time)
+
+            merge = lu.merge_records_to_current_partition([rec], paths)
+            lu.apply_flush_result_to_state(
+                state,
+                "BTCUSDT",
+                merge,
+                closed_at_utc="2026-06-26T00:01:00Z",
+                now_utc="2026-06-26T00:01:01Z",
+            )
+
+            symbol_state = state.symbols["BTCUSDT"]
+            self.assertEqual(symbol_state.last_flushed_open_time, rec.open_time)
+            self.assertEqual(symbol_state.last_closed_open_time, rec.open_time)
+            self.assertEqual(symbol_state.merged_bar_count, 1)
+            self.assertEqual(symbol_state.last_target_path, str(merge.target_path))
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 3 current dataset tests")
+class StartupBackfillCalculationTests(unittest.TestCase):
+    def test_resolve_last_closed_prefers_state_over_current_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            older = make_record(1638747600000)
+            newer = make_record(1638747660000)
+            lu.merge_records_to_current_partition([newer], paths)
+            state = lu.LiveUpdateState.create("1m", paths)
+            state.symbol_state("BTCUSDT").last_closed_open_time = older.open_time
+
+            value, source = lu.resolve_last_closed_open_time(
+                state,
+                "1m",
+                "BTCUSDT",
+                paths,
+            )
+
+            self.assertEqual(value, older.open_time)
+            self.assertEqual(source, "state")
+
+    def test_resolve_last_closed_falls_back_to_current_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            earlier = make_record(1638747600000)
+            later = make_record(1638747660000)
+            lu.merge_records_to_current_partition([earlier, later], paths)
+            state = lu.LiveUpdateState.create("1m", paths)
+
+            value, source = lu.resolve_last_closed_open_time(
+                state,
+                "1m",
+                "BTCUSDT",
+                paths,
+            )
+
+            self.assertEqual(value, later.open_time)
+            self.assertEqual(source, "current_dataset")
+
+    def test_latest_closed_and_missing_bars_calculation(self):
+        latest = lu.calculate_latest_closed_open_time(
+            "1m",
+            1638747785000,
+            close_lag_ms=2000,
+        )
+        self.assertEqual(latest, 1638747720000)
+
+        missing, start, end = lu.calculate_missing_bars(
+            last_closed_open_time=1638747480000,
+            latest_closed_open_time=latest,
+            interval="1m",
+        )
+        self.assertEqual(missing, 4)
+        self.assertEqual(start, 1638747540000)
+        self.assertEqual(end, 1638747720000)
+
+    def test_plan_startup_backfill_skeleton_does_not_fetch_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create(
+                "1m",
+                paths,
+                now_utc="2026-06-26T00:00:00Z",
+            )
+            state.symbol_state("BTCUSDT").last_closed_open_time = 1638747480000
+            lu.save_live_update_state(state, paths)
+
+            plans = lu.plan_startup_backfill(
+                ("1m",),
+                ["BTCUSDT", "ETHUSDT"],
+                paths,
+                now_ms=1638747785000,
+                close_lag_ms=2000,
+            )
+
+            self.assertEqual(len(plans), 1)
+            interval_plan = plans[0]
+            self.assertEqual(interval_plan.interval, "1m")
+            self.assertEqual(interval_plan.init_result.status, "bootstrap_required")
+            btc = interval_plan.plans[0]
+            eth = interval_plan.plans[1]
+            self.assertEqual(btc.status, "missing")
+            self.assertEqual(btc.missing_bars, 4)
+            self.assertEqual(btc.source, "state")
+            self.assertEqual(eth.status, "bootstrap_required")
+            self.assertEqual(eth.source, "bootstrap_required")
+
+
+class ScriptPhase3Tests(unittest.TestCase):
+    def test_script_plan_startup_backfill_requires_symbols(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/live_update.py",
+                "--interval",
+                "1m",
+                "--plan-startup-backfill",
+                "--now-ms",
+                "1638747785000",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--symbols is required", result.stderr)
+
+    def test_script_plan_startup_backfill_outputs_plan_without_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/live_update.py",
+                    "--repo-root",
+                    tmp,
+                    "--interval",
+                    "1m",
+                    "--symbols",
+                    "BTCUSDT",
+                    "--plan-startup-backfill",
+                    "--now-ms",
+                    "1638747785000",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["active_intervals"], ["1m"])
+            self.assertEqual(payload["plans"][0]["plans"][0]["symbol"], "BTCUSDT")
+            self.assertEqual(payload["plans"][0]["plans"][0]["status"], "bootstrap_required")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,11 @@
-"""Phase 1-2 primitives for Binance UM Kline live update.
+"""Phase 1-3 primitives for Binance UM Kline live update.
 
-This module intentionally stops at the Phase 2 boundary from ``LIVE_UPDATE.md``:
+This module intentionally stops at the Phase 3 boundary from ``LIVE_UPDATE.md``:
 data structures, normalized ``KlineRecord`` values, supported interval helpers,
 deterministic path construction/parsing, current dataset initialization, and
-atomic per-partition Parquet merge. Runtime behavior such as state management,
-REST fallback, WebSocket handling, webhook serving, and long-running orchestration
-belongs to later phases.
+atomic per-partition Parquet merge, state management, and startup-backfill gap
+planning. Runtime behavior such as real REST fallback, WebSocket handling,
+webhook serving, and long-running orchestration belongs to later phases.
 """
 
 from __future__ import annotations
@@ -480,6 +480,180 @@ class ParquetMergeResult:
         }
 
 
+@dataclass
+class SymbolState:
+    """Per-symbol state used for resume and startup gap calculation."""
+
+    last_buffered_open_time: int | None = None
+    last_flushed_open_time: int | None = None
+    last_closed_open_time: int | None = None
+    last_closed_at_utc: str | None = None
+    last_ws_message_at_utc: str | None = None
+    merged_bar_count: int = 0
+    last_target_path: str | None = None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> "SymbolState":
+        if not value:
+            return cls()
+        return cls(
+            last_buffered_open_time=_optional_int(value.get("last_buffered_open_time")),
+            last_flushed_open_time=_optional_int(value.get("last_flushed_open_time")),
+            last_closed_open_time=_optional_int(value.get("last_closed_open_time")),
+            last_closed_at_utc=value.get("last_closed_at_utc"),
+            last_ws_message_at_utc=value.get("last_ws_message_at_utc"),
+            merged_bar_count=int(value.get("merged_bar_count") or 0),
+            last_target_path=value.get("last_target_path"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "last_buffered_open_time": self.last_buffered_open_time,
+            "last_flushed_open_time": self.last_flushed_open_time,
+            "last_closed_open_time": self.last_closed_open_time,
+            "last_closed_at_utc": self.last_closed_at_utc,
+            "last_ws_message_at_utc": self.last_ws_message_at_utc,
+            "merged_bar_count": self.merged_bar_count,
+            "last_target_path": self.last_target_path,
+        }
+
+
+@dataclass
+class LiveUpdateState:
+    """Interval-level live-update state file."""
+
+    interval: str
+    current_dataset_root: str
+    created_at_utc: str
+    updated_at_utc: str
+    websocket: dict[str, Any]
+    symbols: dict[str, SymbolState]
+    dataset: str = DATASET_ID
+    schema_version: int = SCHEMA_VERSION
+    dataset_version: str = DATASET_VERSION
+
+    @classmethod
+    def create(
+        cls,
+        interval: str,
+        paths: LiveUpdatePaths | None = None,
+        *,
+        now_utc: str | None = None,
+    ) -> "LiveUpdateState":
+        validate_interval(interval)
+        resolver = paths or LiveUpdatePaths()
+        timestamp = now_utc or utc_now()
+        return cls(
+            interval=interval,
+            current_dataset_root=str(resolver.current_parquet_root(interval)),
+            created_at_utc=timestamp,
+            updated_at_utc=timestamp,
+            websocket={
+                "enabled": True,
+                "last_connected_at_utc": None,
+                "last_message_at_utc": None,
+                "last_reconnect_at_utc": None,
+                "reconnect_count": 0,
+            },
+            symbols={},
+        )
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "LiveUpdateState":
+        interval = validate_interval(str(value["interval"]))
+        symbols = {
+            symbol.upper(): SymbolState.from_dict(symbol_state)
+            for symbol, symbol_state in (value.get("symbols") or {}).items()
+        }
+        return cls(
+            dataset=str(value.get("dataset") or DATASET_ID),
+            schema_version=int(value.get("schema_version") or SCHEMA_VERSION),
+            dataset_version=str(value.get("dataset_version") or DATASET_VERSION),
+            interval=interval,
+            created_at_utc=str(value["created_at_utc"]),
+            updated_at_utc=str(value["updated_at_utc"]),
+            current_dataset_root=str(value["current_dataset_root"]),
+            websocket=dict(value.get("websocket") or {}),
+            symbols=symbols,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dataset": self.dataset,
+            "schema_version": self.schema_version,
+            "dataset_version": self.dataset_version,
+            "interval": self.interval,
+            "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "current_dataset_root": self.current_dataset_root,
+            "websocket": self.websocket,
+            "symbols": {
+                symbol: self.symbols[symbol].to_dict()
+                for symbol in sorted(self.symbols)
+            },
+        }
+
+    def symbol_state(self, symbol: str) -> SymbolState:
+        normalized = symbol.upper()
+        if normalized not in self.symbols:
+            self.symbols[normalized] = SymbolState()
+        return self.symbols[normalized]
+
+
+@dataclass(frozen=True)
+class MissingBarsPlan:
+    """Calculated missing-bar range for a symbol + interval."""
+
+    symbol: str
+    interval: str
+    last_closed_open_time: int | None
+    latest_closed_open_time: int
+    missing_bars: int
+    start_open_time: int | None
+    end_open_time: int | None
+    source: str
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "last_closed_open_time": self.last_closed_open_time,
+            "latest_closed_open_time": self.latest_closed_open_time,
+            "missing_bars": self.missing_bars,
+            "start_open_time": self.start_open_time,
+            "end_open_time": self.end_open_time,
+            "source": self.source,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class StartupBackfillPlan:
+    """Startup backfill orchestration skeleton output.
+
+    Phase 3 only calculates what would need backfilling. It intentionally does
+    not call REST, write buffers, enqueue partitions, or update flush state.
+    """
+
+    interval: str
+    init_result: CurrentDatasetInitResult
+    plans: list[MissingBarsPlan]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "interval": self.interval,
+            "init_result": self.init_result.to_dict(),
+            "plans": [plan.to_dict() for plan in self.plans],
+        }
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def current_dataset_has_parquet(current_root: Path) -> bool:
     return current_root.exists() and any(current_root.rglob("*.parquet"))
 
@@ -695,13 +869,285 @@ def merge_records_to_current_partition(
     )
 
 
+def load_live_update_state(
+    interval: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    create_if_missing: bool = True,
+) -> LiveUpdateState | None:
+    """Load interval state, optionally returning a default state if absent."""
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    path = resolver.state_json(interval)
+    if not path.exists():
+        if not create_if_missing:
+            return None
+        return LiveUpdateState.create(interval, resolver)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LiveUpdateCommandError(f"state is not readable JSON: {path}") from exc
+    state = LiveUpdateState.from_dict(payload)
+    if state.interval != interval:
+        raise LiveUpdateCommandError(
+            f"state interval mismatch: expected {interval}, got {state.interval}"
+        )
+    return state
+
+
+def save_live_update_state(
+    state: LiveUpdateState,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_utc: str | None = None,
+) -> Path:
+    """Atomically save interval state."""
+    resolver = paths or LiveUpdatePaths()
+    state.updated_at_utc = now_utc or utc_now()
+    path = resolver.state_json(state.interval)
+    write_json_atomic(path, state.to_dict())
+    return path
+
+
+def mark_symbol_buffered(
+    state: LiveUpdateState,
+    symbol: str,
+    open_time: int,
+    *,
+    now_utc: str | None = None,
+) -> None:
+    """Record that a closed bar has reached closed_buffer or a write queue."""
+    symbol_state = state.symbol_state(symbol)
+    open_time = int(open_time)
+    current = symbol_state.last_buffered_open_time
+    if current is None or open_time > current:
+        symbol_state.last_buffered_open_time = open_time
+    state.updated_at_utc = now_utc or utc_now()
+
+
+def apply_flush_result_to_state(
+    state: LiveUpdateState,
+    symbol: str,
+    merge_result: ParquetMergeResult,
+    *,
+    closed_at_utc: str | None = None,
+    now_utc: str | None = None,
+) -> None:
+    """Update closed/flushed state after a successful Phase 2 parquet merge."""
+    if merge_result.max_open_time is None:
+        return
+    if merge_result.partition_key.interval != state.interval:
+        raise LiveUpdateCommandError(
+            "merge result interval does not match state interval"
+        )
+    normalized_symbol = symbol.upper()
+    if merge_result.partition_key.symbol.upper() != normalized_symbol:
+        raise LiveUpdateCommandError(
+            "merge result symbol does not match state symbol"
+        )
+    symbol_state = state.symbol_state(normalized_symbol)
+    max_open = int(merge_result.max_open_time)
+    symbol_state.last_flushed_open_time = max_open
+    symbol_state.last_closed_open_time = max_open
+    symbol_state.last_closed_at_utc = closed_at_utc or now_utc or utc_now()
+    symbol_state.merged_bar_count += int(merge_result.input_row_count)
+    symbol_state.last_target_path = str(merge_result.target_path)
+    state.updated_at_utc = now_utc or utc_now()
+
+
+def state_last_closed_open_time(
+    state: LiveUpdateState | None,
+    symbol: str,
+) -> int | None:
+    if state is None:
+        return None
+    symbol_state = state.symbols.get(symbol.upper())
+    if symbol_state is None:
+        return None
+    return symbol_state.last_closed_open_time
+
+
+def max_open_time_from_current_dataset(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+) -> int | None:
+    """Read the current dataset and return max open_time for one symbol."""
+    validate_interval(interval)
+    require_pyarrow()
+    resolver = paths or LiveUpdatePaths()
+    symbol_root = resolver.current_parquet_root(interval) / f"symbol={symbol.upper()}"
+    if not symbol_root.exists():
+        return None
+    max_open: int | None = None
+    for path in sorted(symbol_root.rglob("*.parquet")):
+        table = pq.ParquetFile(path).read(columns=["open_time"])
+        values = table.column("open_time").to_pylist()
+        if not values:
+            continue
+        file_max = max(int(value) for value in values)
+        if max_open is None or file_max > max_open:
+            max_open = file_max
+    return max_open
+
+
+def resolve_last_closed_open_time(
+    state: LiveUpdateState | None,
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+) -> tuple[int | None, str]:
+    """Resolve startup source: state first, then current dataset max open_time."""
+    from_state = state_last_closed_open_time(state, symbol)
+    if from_state is not None:
+        return from_state, "state"
+    from_current = max_open_time_from_current_dataset(interval, symbol, paths)
+    if from_current is not None:
+        return from_current, "current_dataset"
+    return None, "bootstrap_required"
+
+
+def calculate_latest_closed_open_time(
+    interval: str,
+    now_ms: int,
+    *,
+    close_lag_ms: int = 2000,
+) -> int:
+    interval_ms = interval_milliseconds(interval)
+    safe_now_ms = int(now_ms) - int(close_lag_ms)
+    return (safe_now_ms // interval_ms) * interval_ms - interval_ms
+
+
+def calculate_missing_bars(
+    *,
+    last_closed_open_time: int,
+    latest_closed_open_time: int,
+    interval: str,
+) -> tuple[int, int | None, int | None]:
+    interval_ms = interval_milliseconds(interval)
+    missing = max(
+        0,
+        (int(latest_closed_open_time) - int(last_closed_open_time)) // interval_ms,
+    )
+    if missing == 0:
+        return 0, None, None
+    return (
+        missing,
+        int(last_closed_open_time) + interval_ms,
+        int(latest_closed_open_time),
+    )
+
+
+def plan_symbol_startup_backfill(
+    *,
+    interval: str,
+    symbol: str,
+    state: LiveUpdateState | None,
+    paths: LiveUpdatePaths | None,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> MissingBarsPlan:
+    latest_closed = calculate_latest_closed_open_time(
+        interval,
+        now_ms,
+        close_lag_ms=close_lag_ms,
+    )
+    last_closed, source = resolve_last_closed_open_time(
+        state,
+        interval,
+        symbol,
+        paths,
+    )
+    if last_closed is None:
+        return MissingBarsPlan(
+            symbol=symbol.upper(),
+            interval=interval,
+            last_closed_open_time=None,
+            latest_closed_open_time=latest_closed,
+            missing_bars=0,
+            start_open_time=None,
+            end_open_time=None,
+            source=source,
+            status="bootstrap_required",
+        )
+    missing, start, end = calculate_missing_bars(
+        last_closed_open_time=last_closed,
+        latest_closed_open_time=latest_closed,
+        interval=interval,
+    )
+    return MissingBarsPlan(
+        symbol=symbol.upper(),
+        interval=interval,
+        last_closed_open_time=last_closed,
+        latest_closed_open_time=latest_closed,
+        missing_bars=missing,
+        start_open_time=start,
+        end_open_time=end,
+        source=source,
+        status="missing" if missing > 0 else "up_to_date",
+    )
+
+
+def plan_startup_backfill(
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> list[StartupBackfillPlan]:
+    """Phase 3 startup-backfill orchestration skeleton.
+
+    This initializes/checks current datasets, loads state, and calculates gap
+    ranges. It intentionally does not call REST or mutate last_closed state.
+    """
+    resolver = paths or LiveUpdatePaths()
+    plans: list[StartupBackfillPlan] = []
+    for interval in intervals:
+        init_result = ensure_current_dataset(interval, resolver)
+        state = load_live_update_state(interval, resolver)
+        symbol_plans = [
+            plan_symbol_startup_backfill(
+                interval=interval,
+                symbol=symbol,
+                state=state,
+                paths=resolver,
+                now_ms=now_ms,
+                close_lag_ms=close_lag_ms,
+            )
+            for symbol in symbols
+        ]
+        plans.append(
+            StartupBackfillPlan(
+                interval=interval,
+                init_result=init_result,
+                plans=symbol_plans,
+            )
+        )
+    return plans
+
+
+def parse_symbols_arg(value: str | None) -> list[str]:
+    if not value:
+        return []
+    symbols: list[str] = []
+    for chunk in value.replace(",", " ").split():
+        symbol = chunk.strip().upper()
+        if symbol:
+            symbols.append(symbol)
+    return symbols
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1-2 live-update layout and current dataset tools.",
+        description="Phase 1-3 live-update layout, current dataset, and state tools.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
+    parser.add_argument("--symbols", default="")
+    parser.add_argument("--close-lag-ms", type=int, default=2000)
+    parser.add_argument("--now-ms", type=int, default=None)
     parser.add_argument("--current-dataset-root", default=str(DEFAULT_CURRENT_DATASET_ROOT))
     parser.add_argument("--seed-dataset-root", default=str(DEFAULT_SEED_DATASET_ROOT))
     parser.add_argument(
@@ -713,6 +1159,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--initialize-current-dataset",
         action="store_true",
         help="initialize current historical dataset for the requested interval(s) and exit",
+    )
+    parser.add_argument(
+        "--plan-startup-backfill",
+        action="store_true",
+        help="calculate Phase 3 startup-backfill gaps without calling REST",
     )
     return parser
 
@@ -748,10 +1199,35 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload), end="")
         return 0
+    if args.plan_startup_backfill:
+        symbols = parse_symbols_arg(args.symbols)
+        if not symbols:
+            raise LiveUpdateCommandError(
+                "--symbols is required for Phase 3 startup backfill planning"
+            )
+        now_ms = args.now_ms
+        if now_ms is None:
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        plans = plan_startup_backfill(
+            intervals,
+            symbols,
+            paths,
+            now_ms=now_ms,
+            close_lag_ms=args.close_lag_ms,
+        )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "plans": [plan.to_dict() for plan in plans],
+        }
+        print(pretty_json(payload), end="")
+        return 0
     print(
-        "Phase 2 scaffold ready: "
+        "Phase 3 scaffold ready: "
         f"active_intervals={','.join(intervals)}; "
-        "state/backfill/runtime phases are not implemented yet."
+        "REST/WebSocket/webhook/runtime phases are not implemented yet."
     )
     return 0
 
