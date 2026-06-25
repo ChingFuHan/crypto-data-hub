@@ -1,11 +1,12 @@
-"""Phase 1-3 primitives for Binance UM Kline live update.
+"""Phase 1-5 primitives for Binance UM Kline live update.
 
-This module intentionally stops at the Phase 3 boundary from ``LIVE_UPDATE.md``:
+This module intentionally stops at the Phase 5 boundary from ``LIVE_UPDATE.md``:
 data structures, normalized ``KlineRecord`` values, supported interval helpers,
 deterministic path construction/parsing, current dataset initialization, and
 atomic per-partition Parquet merge, state management, and startup-backfill gap
-planning. Runtime behavior such as real REST fallback, WebSocket handling,
-webhook serving, and long-running orchestration belongs to later phases.
+planning, REST fallback, and testable WebSocket manager primitives. Runtime
+behavior such as webhook serving, full CLI modes, and long-running production
+orchestration belongs to later phases.
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ BINANCE_REST_BASE_URL = "https://fapi.binance.com"
 REST_KLINES_PATH = "/fapi/v1/klines"
 REST_SOURCE_ARCHIVE = "live_rest:/fapi/v1/klines"
 REST_ARCHIVE_SOURCE = "live_rest"
+BINANCE_WS_BASE_URL = "wss://fstream.binance.com"
+WS_SOURCE_ARCHIVE = "live_websocket:kline"
+WS_ARCHIVE_SOURCE = "live_websocket"
 
 SUPPORTED_INTERVALS: tuple[str, ...] = ("1m", "3m", "5m", "15m", "1h", "4h", "1d")
 CLI_INTERVALS: tuple[str, ...] = ("all",) + SUPPORTED_INTERVALS
@@ -685,6 +689,89 @@ class StartupBackfillPlan:
             "interval": self.interval,
             "init_result": self.init_result.to_dict(),
             "plans": [plan.to_dict() for plan in self.plans],
+        }
+
+
+@dataclass(frozen=True)
+class WebSocketKlineEvent:
+    """Normalized WebSocket Kline event."""
+
+    record: KlineRecord
+    is_closed: bool
+    raw_payload: dict[str, Any]
+    stream: str | None = None
+
+
+@dataclass(frozen=True)
+class WebSocketConnectionSpec:
+    """One combined-stream WebSocket connection specification."""
+
+    streams: tuple[str, ...]
+    url: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stream_count": len(self.streams),
+            "streams": list(self.streams),
+            "url": self.url,
+        }
+
+
+@dataclass(frozen=True)
+class WebSocketProcessResult:
+    """Outcome of processing one WebSocket kline payload."""
+
+    status: str
+    symbol: str
+    interval: str
+    open_time: int
+    is_closed: bool
+    merge_result: ParquetMergeResult | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "status": self.status,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "open_time": self.open_time,
+            "is_closed": self.is_closed,
+        }
+        if self.merge_result:
+            payload["merge_result"] = self.merge_result.to_dict()
+        return payload
+
+
+@dataclass(frozen=True)
+class StaleStream:
+    """One stale symbol + interval detected from WebSocket state."""
+
+    symbol: str
+    interval: str
+    last_ws_message_at_utc: str | None
+    stale_threshold_ms: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "last_ws_message_at_utc": self.last_ws_message_at_utc,
+            "stale_threshold_ms": self.stale_threshold_ms,
+        }
+
+
+@dataclass(frozen=True)
+class WebSocketReconnectResult:
+    """Reconnect/rotate skeleton result."""
+
+    status: str
+    reconnect_count: int
+    rest_results: list[RestBackfillResult]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reconnect_count": self.reconnect_count,
+            "rest_results": [result.to_dict() for result in self.rest_results],
         }
 
 
@@ -1422,13 +1509,14 @@ def write_closed_buffer(
     event: RestKlineEvent,
     *,
     closed_at_utc: str,
+    source: str = REST_ARCHIVE_SOURCE,
 ) -> None:
     record = event.record
     append_jsonl(
         paths.closed_buffer_jsonl(record.interval, record.date),
         {
             "closed_at_utc": closed_at_utc,
-            "source": REST_ARCHIVE_SOURCE,
+            "source": source,
             "schema_version": SCHEMA_VERSION,
             "record": record.logical_dict(),
         },
@@ -1440,6 +1528,7 @@ def write_latest(
     event: RestKlineEvent,
     *,
     updated_at_utc: str,
+    source: str = REST_ARCHIVE_SOURCE,
 ) -> None:
     record = event.record
     latest_record = record.logical_dict()
@@ -1448,7 +1537,7 @@ def write_latest(
         paths.latest_json(record.interval, record.symbol),
         {
             "updated_at_utc": updated_at_utc,
-            "source": REST_ARCHIVE_SOURCE,
+            "source": source,
             "record": latest_record,
             "validation_errors": [],
         },
@@ -1706,6 +1795,351 @@ def run_gap_repair_once(
     return run_startup_backfill_once(intervals, symbols, paths, **kwargs)
 
 
+def websocket_stream_name(symbol: str, interval: str) -> str:
+    validate_interval(interval)
+    return f"{symbol.lower()}@kline_{interval}"
+
+
+def build_websocket_streams(
+    symbols: list[str],
+    intervals: tuple[str, ...],
+) -> tuple[str, ...]:
+    streams: list[str] = []
+    for symbol in symbols:
+        normalized = symbol.strip().upper()
+        if not normalized:
+            continue
+        for interval in intervals:
+            streams.append(websocket_stream_name(normalized, interval))
+    return tuple(streams)
+
+
+def batch_websocket_streams(
+    streams: tuple[str, ...],
+    *,
+    ws_batch_size: int = 100,
+    max_streams_per_connection: int = 1024,
+) -> list[tuple[str, ...]]:
+    if ws_batch_size <= 0:
+        raise LiveUpdateCommandError("ws_batch_size must be positive")
+    if max_streams_per_connection <= 0:
+        raise LiveUpdateCommandError("max_streams_per_connection must be positive")
+    if ws_batch_size > max_streams_per_connection:
+        raise LiveUpdateCommandError(
+            "ws_batch_size must not exceed max_streams_per_connection"
+        )
+    return [
+        tuple(streams[i:i + ws_batch_size])
+        for i in range(0, len(streams), ws_batch_size)
+    ]
+
+
+def combined_stream_url(
+    streams: tuple[str, ...],
+    *,
+    base_url: str = BINANCE_WS_BASE_URL,
+) -> str:
+    if not streams:
+        raise LiveUpdateCommandError("cannot build combined stream URL with no streams")
+    joined = "/".join(streams)
+    return base_url.rstrip("/") + "/market/stream?streams=" + joined
+
+
+def build_websocket_connection_specs(
+    symbols: list[str],
+    intervals: tuple[str, ...],
+    *,
+    ws_batch_size: int = 100,
+    max_streams_per_connection: int = 1024,
+    base_url: str = BINANCE_WS_BASE_URL,
+) -> list[WebSocketConnectionSpec]:
+    streams = build_websocket_streams(symbols, intervals)
+    batches = batch_websocket_streams(
+        streams,
+        ws_batch_size=ws_batch_size,
+        max_streams_per_connection=max_streams_per_connection,
+    )
+    return [
+        WebSocketConnectionSpec(
+            streams=batch,
+            url=combined_stream_url(batch, base_url=base_url),
+        )
+        for batch in batches
+    ]
+
+
+def unwrap_websocket_payload(payload: str | dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        raise LiveUpdateCommandError("WebSocket payload must be a JSON object")
+    if "data" in payload and "stream" in payload:
+        data = payload["data"]
+        if not isinstance(data, dict):
+            raise LiveUpdateCommandError("combined WebSocket data must be an object")
+        return str(payload["stream"]), data
+    return None, payload
+
+
+def websocket_payload_to_event(payload: str | dict[str, Any]) -> WebSocketKlineEvent:
+    stream, data = unwrap_websocket_payload(payload)
+    if data.get("e") != "kline" or not isinstance(data.get("k"), dict):
+        raise LiveUpdateCommandError("WebSocket payload is not a kline event")
+    kline = data["k"]
+    symbol = str(kline.get("s") or data.get("s") or "").upper()
+    interval = str(kline.get("i") or "")
+    if not symbol:
+        raise LiveUpdateCommandError("WebSocket kline payload has no symbol")
+    validate_interval(interval)
+    open_time = int(kline["t"])
+    fields = datetime_fields(open_time)
+    record = KlineRecord.build(
+        symbol=symbol,
+        interval=interval,
+        open_time=open_time,
+        open=float(kline["o"]),
+        high=float(kline["h"]),
+        low=float(kline["l"]),
+        close=float(kline["c"]),
+        volume=float(kline["v"]),
+        close_time=int(kline["T"]),
+        quote_volume=float(kline["q"]),
+        trade_count=int(kline["n"]),
+        taker_buy_base_volume=float(kline["V"]),
+        taker_buy_quote_volume=float(kline["Q"]),
+        source_archive=WS_SOURCE_ARCHIVE,
+        archive_source=WS_ARCHIVE_SOURCE,
+        archive_period=fields["date"],
+    )
+    if stream is None:
+        stream = websocket_stream_name(symbol, interval)
+    return WebSocketKlineEvent(
+        record=record,
+        is_closed=bool(kline.get("x")),
+        raw_payload=data,
+        stream=stream,
+    )
+
+
+def write_websocket_buffer(
+    paths: LiveUpdatePaths,
+    event: WebSocketKlineEvent,
+    *,
+    received_at_utc: str,
+) -> None:
+    record = event.record
+    append_jsonl(
+        paths.buffer_jsonl(record.interval, "websocket_buffer", record.date),
+        {
+            "received_at_utc": received_at_utc,
+            "source": "websocket",
+            "stream": event.stream,
+            "record_key": record.record_key().as_dict(),
+            "validation_errors": [],
+            "payload": event.raw_payload,
+        },
+    )
+
+
+def process_websocket_kline_event(
+    event: WebSocketKlineEvent,
+    state: LiveUpdateState,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    received_at_utc: str | None = None,
+) -> WebSocketProcessResult:
+    resolver = paths or LiveUpdatePaths()
+    timestamp = received_at_utc or utc_now()
+    record = event.record
+    if record.interval != state.interval:
+        raise LiveUpdateCommandError(
+            f"WebSocket event interval {record.interval} does not match state {state.interval}"
+        )
+
+    write_websocket_buffer(resolver, event, received_at_utc=timestamp)
+    write_latest(resolver, event, updated_at_utc=timestamp, source="websocket")
+    symbol_state = state.symbol_state(record.symbol)
+    symbol_state.last_ws_message_at_utc = timestamp
+    state.websocket["last_message_at_utc"] = timestamp
+    state.updated_at_utc = timestamp
+
+    if not event.is_closed:
+        save_live_update_state(state, resolver, now_utc=timestamp)
+        return WebSocketProcessResult(
+            status="open_buffered",
+            symbol=record.symbol,
+            interval=record.interval,
+            open_time=record.open_time,
+            is_closed=False,
+        )
+
+    write_closed_buffer(resolver, event, closed_at_utc=timestamp, source="websocket")
+    mark_symbol_buffered(state, record.symbol, record.open_time, now_utc=timestamp)
+    merge_result = merge_records_to_current_partition([record], resolver)
+    apply_flush_result_to_state(
+        state,
+        record.symbol,
+        merge_result,
+        closed_at_utc=timestamp,
+        now_utc=timestamp,
+    )
+    save_live_update_state(state, resolver, now_utc=timestamp)
+    return WebSocketProcessResult(
+        status="closed_merged",
+        symbol=record.symbol,
+        interval=record.interval,
+        open_time=record.open_time,
+        is_closed=True,
+        merge_result=merge_result,
+    )
+
+
+def process_websocket_message(
+    payload: str | dict[str, Any],
+    state: LiveUpdateState,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    received_at_utc: str | None = None,
+) -> WebSocketProcessResult:
+    event = websocket_payload_to_event(payload)
+    return process_websocket_kline_event(
+        event,
+        state,
+        paths,
+        received_at_utc=received_at_utc,
+    )
+
+
+def _utc_iso_to_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def detect_stale_streams(
+    state: LiveUpdateState,
+    symbols: list[str],
+    *,
+    now_ms: int,
+    ws_stale_multiplier: int = 3,
+) -> list[StaleStream]:
+    stale: list[StaleStream] = []
+    threshold = interval_milliseconds(state.interval) * int(ws_stale_multiplier)
+    for symbol in symbols:
+        normalized = symbol.upper()
+        symbol_state = state.symbols.get(normalized)
+        last_ws = symbol_state.last_ws_message_at_utc if symbol_state else None
+        last_ms = _utc_iso_to_ms(last_ws)
+        if last_ms is None or int(now_ms) - last_ms > threshold:
+            stale.append(
+                StaleStream(
+                    symbol=normalized,
+                    interval=state.interval,
+                    last_ws_message_at_utc=last_ws,
+                    stale_threshold_ms=threshold,
+                )
+            )
+    return stale
+
+
+def run_stale_rest_fallback_once(
+    state: LiveUpdateState,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    ws_stale_multiplier: int = 3,
+    **rest_kwargs: Any,
+) -> list[RestBackfillResult]:
+    resolver = paths or LiveUpdatePaths()
+    stale = detect_stale_streams(
+        state,
+        symbols,
+        now_ms=now_ms,
+        ws_stale_multiplier=ws_stale_multiplier,
+    )
+    results: list[RestBackfillResult] = []
+    for stale_stream in stale:
+        plan = plan_symbol_startup_backfill(
+            interval=state.interval,
+            symbol=stale_stream.symbol,
+            state=state,
+            paths=resolver,
+            now_ms=now_ms,
+            close_lag_ms=int(rest_kwargs.get("close_lag_ms", 2000)),
+        )
+        results.append(
+            run_rest_backfill_for_plan(
+                plan,
+                state,
+                resolver,
+                now_ms=now_ms,
+                **rest_kwargs,
+            )
+        )
+    return results
+
+
+def handle_websocket_reconnect(
+    state: LiveUpdateState,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    now_utc: str | None = None,
+    **rest_kwargs: Any,
+) -> WebSocketReconnectResult:
+    timestamp = now_utc or utc_now()
+    state.websocket["last_reconnect_at_utc"] = timestamp
+    state.websocket["reconnect_count"] = int(state.websocket.get("reconnect_count") or 0) + 1
+    state.updated_at_utc = timestamp
+    results = run_stale_rest_fallback_once(
+        state,
+        symbols,
+        paths,
+        now_ms=now_ms,
+        **rest_kwargs,
+    )
+    save_live_update_state(state, paths, now_utc=timestamp)
+    return WebSocketReconnectResult(
+        status="reconnected",
+        reconnect_count=int(state.websocket["reconnect_count"]),
+        rest_results=results,
+    )
+
+
+def plan_websocket_rotation(
+    state: LiveUpdateState,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    rotate_hours: int = 23,
+    last_connected_at_utc: str | None = None,
+    **rest_kwargs: Any,
+) -> WebSocketReconnectResult:
+    last_connected = last_connected_at_utc or state.websocket.get("last_connected_at_utc")
+    last_connected_ms = _utc_iso_to_ms(last_connected)
+    rotate_ms = int(rotate_hours) * 3_600_000
+    if last_connected_ms is not None and int(now_ms) - last_connected_ms < rotate_ms:
+        return WebSocketReconnectResult(
+            status="not_due",
+            reconnect_count=int(state.websocket.get("reconnect_count") or 0),
+            rest_results=[],
+        )
+    return handle_websocket_reconnect(
+        state,
+        symbols,
+        paths,
+        now_ms=now_ms,
+        **rest_kwargs,
+    )
+
+
 def parse_symbols_arg(value: str | None) -> list[str]:
     if not value:
         return []
@@ -1720,7 +2154,7 @@ def parse_symbols_arg(value: str | None) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1-3 live-update layout, current dataset, and state tools.",
+        description="Phase 1-5 live-update layout, state, REST, and WebSocket tools.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
@@ -1733,6 +2167,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rest-max-retries", type=int, default=5)
     parser.add_argument("--rest-backoff-base-seconds", type=float, default=1)
     parser.add_argument("--rest-backoff-max-seconds", type=float, default=60)
+    parser.add_argument("--binance-ws-base-url", default=BINANCE_WS_BASE_URL)
+    parser.add_argument("--ws-batch-size", type=int, default=100)
+    parser.add_argument("--max-streams-per-connection", type=int, default=1024)
     parser.add_argument("--current-dataset-root", default=str(DEFAULT_CURRENT_DATASET_ROOT))
     parser.add_argument("--seed-dataset-root", default=str(DEFAULT_SEED_DATASET_ROOT))
     parser.add_argument(
@@ -1754,6 +2191,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-startup-backfill-once",
         action="store_true",
         help="run Phase 4 REST startup backfill once and exit",
+    )
+    parser.add_argument(
+        "--describe-websocket-connections",
+        action="store_true",
+        help="print Phase 5 combined stream connection specs and exit",
     )
     return parser
 
@@ -1845,10 +2287,35 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload), end="")
         return 0
+    if args.describe_websocket_connections:
+        symbols = parse_symbols_arg(args.symbols)
+        if not symbols:
+            raise LiveUpdateCommandError(
+                "--symbols is required for Phase 5 WebSocket connection planning"
+            )
+        specs = build_websocket_connection_specs(
+            symbols,
+            intervals,
+            ws_batch_size=args.ws_batch_size,
+            max_streams_per_connection=args.max_streams_per_connection,
+            base_url=args.binance_ws_base_url,
+        )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "symbols": symbols,
+            "connection_count": len(specs),
+            "stream_count": sum(len(spec.streams) for spec in specs),
+            "connections": [spec.to_dict() for spec in specs],
+        }
+        print(pretty_json(payload), end="")
+        return 0
     print(
-        "Phase 4 scaffold ready: "
+        "Phase 5 scaffold ready: "
         f"active_intervals={','.join(intervals)}; "
-        "WebSocket/webhook/full runtime phases are not implemented yet."
+        "webhook/full runtime phases are not implemented yet."
     )
     return 0
 

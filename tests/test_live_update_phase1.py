@@ -189,6 +189,33 @@ def rest_row(open_time, *, close=1.5):
     ]
 
 
+def ws_payload(open_time, *, interval="1m", closed=False, symbol="BTCUSDT", close=1.5):
+    return {
+        "e": "kline",
+        "E": open_time + 1000,
+        "s": symbol.upper(),
+        "k": {
+            "t": open_time,
+            "T": open_time + lu.interval_milliseconds(interval) - 1,
+            "s": symbol.upper(),
+            "i": interval,
+            "f": 1,
+            "L": 2,
+            "o": "1.0",
+            "c": str(close),
+            "h": str(max(2.0, close)),
+            "l": "0.5",
+            "v": "10.0",
+            "n": 3,
+            "x": closed,
+            "q": "15.0",
+            "V": "5.0",
+            "Q": "7.5",
+            "B": "0",
+        },
+    }
+
+
 class FakeHttpResponse:
     def __init__(self, payload):
         self.payload = payload
@@ -842,6 +869,232 @@ class ScriptPhase4Tests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("--symbols is required", result.stderr)
+
+
+class WebSocketPlanningTests(unittest.TestCase):
+    def test_stream_names_expand_symbols_and_intervals(self):
+        self.assertEqual(
+            lu.websocket_stream_name("BTCUSDT", "1m"),
+            "btcusdt@kline_1m",
+        )
+        streams = lu.build_websocket_streams(["btcusdt"], lu.SUPPORTED_INTERVALS)
+        self.assertEqual(len(streams), len(lu.SUPPORTED_INTERVALS))
+        self.assertEqual(streams[0], "btcusdt@kline_1m")
+        self.assertEqual(streams[-1], "btcusdt@kline_1d")
+
+    def test_batches_and_combined_urls_are_deterministic(self):
+        streams = (
+            "btcusdt@kline_1m",
+            "btcusdt@kline_3m",
+            "ethusdt@kline_1m",
+        )
+        batches = lu.batch_websocket_streams(streams, ws_batch_size=2)
+        self.assertEqual(
+            batches,
+            [("btcusdt@kline_1m", "btcusdt@kline_3m"), ("ethusdt@kline_1m",)],
+        )
+        url = lu.combined_stream_url(batches[0], base_url="wss://example.test/")
+        self.assertEqual(
+            url,
+            "wss://example.test/market/stream?streams=btcusdt@kline_1m/btcusdt@kline_3m",
+        )
+        with self.assertRaises(lu.LiveUpdateCommandError):
+            lu.batch_websocket_streams(streams, ws_batch_size=2, max_streams_per_connection=1)
+
+    def test_connection_specs_include_urls_and_stream_counts(self):
+        specs = lu.build_websocket_connection_specs(
+            ["BTCUSDT"],
+            lu.SUPPORTED_INTERVALS,
+            ws_batch_size=3,
+            base_url="wss://example.test",
+        )
+
+        self.assertEqual(len(specs), 3)
+        self.assertEqual(sum(len(spec.streams) for spec in specs), 7)
+        self.assertTrue(specs[0].url.startswith("wss://example.test/market/stream?streams="))
+
+
+class WebSocketPayloadTests(unittest.TestCase):
+    def test_combined_payload_parses_to_normalized_event(self):
+        payload = {
+            "stream": "btcusdt@kline_1m",
+            "data": ws_payload(1638747600000, closed=True, close=2.5),
+        }
+
+        event = lu.websocket_payload_to_event(json.dumps(payload))
+
+        self.assertEqual(event.stream, "btcusdt@kline_1m")
+        self.assertTrue(event.is_closed)
+        self.assertEqual(event.record.symbol, "BTCUSDT")
+        self.assertEqual(event.record.archive_source, "live_websocket")
+        self.assertEqual(event.record.close, 2.5)
+
+    def test_raw_payload_derives_stream_name(self):
+        event = lu.websocket_payload_to_event(ws_payload(1638747600000, interval="3m"))
+
+        self.assertEqual(event.stream, "btcusdt@kline_3m")
+        self.assertFalse(event.is_closed)
+        self.assertEqual(event.record.interval, "3m")
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 5 parquet tests")
+class WebSocketProcessingTests(unittest.TestCase):
+    def test_open_websocket_bar_updates_buffer_latest_and_state_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+
+            result = lu.process_websocket_message(
+                ws_payload(1638747600000, closed=False),
+                state,
+                paths,
+                received_at_utc="2026-06-26T00:00:00Z",
+            )
+
+            self.assertEqual(result.status, "open_buffered")
+            self.assertTrue(paths.buffer_jsonl("1m", "websocket_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertFalse(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertFalse(paths.current_parquet_root("1m").exists())
+            self.assertEqual(
+                state.websocket["last_message_at_utc"],
+                "2026-06-26T00:00:00Z",
+            )
+            self.assertEqual(
+                state.symbols["BTCUSDT"].last_ws_message_at_utc,
+                "2026-06-26T00:00:00Z",
+            )
+
+    def test_closed_websocket_bar_writes_closed_buffer_merges_and_updates_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+
+            result = lu.process_websocket_message(
+                ws_payload(1638747600000, closed=True, close=4.5),
+                state,
+                paths,
+                received_at_utc="2026-06-26T00:01:00Z",
+            )
+
+            self.assertEqual(result.status, "closed_merged")
+            self.assertTrue(paths.buffer_jsonl("1m", "websocket_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertIsNotNone(result.merge_result)
+            rows = pq.ParquetFile(result.merge_result.target_path).read().to_pylist()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["close"], 4.5)
+            self.assertEqual(rows[0]["archive_source"], "live_websocket")
+            self.assertEqual(state.symbols["BTCUSDT"].last_closed_open_time, 1638747600000)
+            self.assertTrue(paths.state_json("1m").exists())
+
+
+class WebSocketStaleAndReconnectTests(unittest.TestCase):
+    def test_detect_stale_streams_uses_interval_multiplier(self):
+        state = lu.LiveUpdateState.create("1m")
+        state.symbol_state("BTCUSDT").last_ws_message_at_utc = "2021-12-06T00:00:00Z"
+        stale = lu.detect_stale_streams(
+            state,
+            ["BTCUSDT", "ETHUSDT"],
+            now_ms=1638748981000,
+            ws_stale_multiplier=3,
+        )
+
+        self.assertEqual([item.symbol for item in stale], ["BTCUSDT", "ETHUSDT"])
+        self.assertEqual(stale[0].stale_threshold_ms, 180000)
+
+    def test_stale_rest_fallback_uses_phase4_plans_without_network_for_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+
+            results = lu.run_stale_rest_fallback_once(
+                state,
+                ["BTCUSDT"],
+                paths,
+                now_ms=1638748981000,
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].status, "bootstrap_required")
+            self.assertEqual(results[0].fetched_row_count, 0)
+
+    def test_reconnect_increments_state_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+
+            result = lu.handle_websocket_reconnect(
+                state,
+                ["BTCUSDT"],
+                paths,
+                now_ms=1638748981000,
+                now_utc="2026-06-26T00:02:00Z",
+            )
+
+            self.assertEqual(result.status, "reconnected")
+            self.assertEqual(result.reconnect_count, 1)
+            self.assertEqual(state.websocket["last_reconnect_at_utc"], "2026-06-26T00:02:00Z")
+            loaded = lu.load_live_update_state("1m", paths)
+            self.assertEqual(loaded.websocket["reconnect_count"], 1)
+
+    def test_rotation_reports_not_due_or_reconnects_when_due(self):
+        state = lu.LiveUpdateState.create("1m")
+        state.websocket["last_connected_at_utc"] = "2021-12-06T00:00:00Z"
+
+        not_due = lu.plan_websocket_rotation(
+            state,
+            ["BTCUSDT"],
+            now_ms=1638748981000,
+            rotate_hours=23,
+        )
+        self.assertEqual(not_due.status, "not_due")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            due_state = lu.LiveUpdateState.create("1m", paths)
+            due_state.websocket["last_connected_at_utc"] = "2021-12-05T00:00:00Z"
+            due = lu.plan_websocket_rotation(
+                due_state,
+                ["BTCUSDT"],
+                paths,
+                now_ms=1638748981000,
+                rotate_hours=23,
+            )
+            self.assertEqual(due.status, "reconnected")
+            self.assertEqual(due.reconnect_count, 1)
+
+
+class ScriptPhase5Tests(unittest.TestCase):
+    def test_script_describe_websocket_connections_outputs_specs_without_socket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/live_update.py",
+                    "--repo-root",
+                    tmp,
+                    "--interval",
+                    "all",
+                    "--symbols",
+                    "BTCUSDT",
+                    "--describe-websocket-connections",
+                    "--ws-batch-size",
+                    "3",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["active_intervals"], list(lu.SUPPORTED_INTERVALS))
+            self.assertEqual(payload["stream_count"], 7)
+            self.assertEqual(payload["connection_count"], 3)
+            self.assertIn("/market/stream?streams=", payload["connections"][0]["url"])
 
 
 if __name__ == "__main__":
