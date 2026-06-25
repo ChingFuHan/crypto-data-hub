@@ -13,6 +13,11 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import socket
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -33,6 +38,10 @@ else:
 DATASET_ID = "market.binance.um.klines.live_update"
 SCHEMA_VERSION = 1
 DATASET_VERSION = "current-v1"
+BINANCE_REST_BASE_URL = "https://fapi.binance.com"
+REST_KLINES_PATH = "/fapi/v1/klines"
+REST_SOURCE_ARCHIVE = "live_rest:/fapi/v1/klines"
+REST_ARCHIVE_SOURCE = "live_rest"
 
 SUPPORTED_INTERVALS: tuple[str, ...] = ("1m", "3m", "5m", "15m", "1h", "4h", "1d")
 CLI_INTERVALS: tuple[str, ...] = ("all",) + SUPPORTED_INTERVALS
@@ -87,6 +96,10 @@ class LiveUpdateDependencyError(RuntimeError):
     """Raised when an optional runtime dependency is missing."""
 
 
+class RestStopRequests(RuntimeError):
+    """Raised when REST requests must stop, e.g. HTTP 418."""
+
+
 def require_pyarrow() -> None:
     if pa is None:
         raise LiveUpdateDependencyError(
@@ -113,6 +126,33 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(pretty_json(payload), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def jsonl_line(record: dict[str, Any]) -> str:
+    return json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(jsonl_line(record))
+
+
+def write_warning_log(
+    paths: "LiveUpdatePaths",
+    interval: str,
+    message: str,
+    *,
+    date: str | None = None,
+    level: str = "warning",
+) -> None:
+    log_date = date or utc_now()[:10]
+    record = {
+        "logged_at_utc": utc_now(),
+        "level": level,
+        "message": message,
+    }
+    append_jsonl(paths.runtime_log(interval, log_date, "warnings.log"), record)
 
 
 def validate_interval(interval: str) -> str:
@@ -648,6 +688,71 @@ class StartupBackfillPlan:
         }
 
 
+@dataclass(frozen=True)
+class RestKlineEvent:
+    """Normalized REST Kline row plus closed/open status."""
+
+    record: KlineRecord
+    is_closed: bool
+    raw_row: list[Any]
+
+
+@dataclass(frozen=True)
+class RestFetchResult:
+    """Result of one REST /fapi/v1/klines request."""
+
+    status: str
+    rows: list[list[Any]]
+    url: str
+    http_status: int | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "status": self.status,
+            "row_count": len(self.rows),
+            "url": self.url,
+            "http_status": self.http_status,
+        }
+        if self.error:
+            payload["error"] = self.error
+        return payload
+
+
+@dataclass(frozen=True)
+class RestBackfillResult:
+    """Outcome for one symbol interval REST backfill/gap-repair run."""
+
+    symbol: str
+    interval: str
+    status: str
+    requested_start_open_time: int | None
+    requested_end_open_time: int | None
+    fetched_row_count: int
+    event_row_count: int
+    closed_row_count: int
+    merged_row_count: int
+    latest_open_row_count: int
+    merge_results: list[ParquetMergeResult]
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "status": self.status,
+            "requested_start_open_time": self.requested_start_open_time,
+            "requested_end_open_time": self.requested_end_open_time,
+            "fetched_row_count": self.fetched_row_count,
+            "event_row_count": self.event_row_count,
+            "closed_row_count": self.closed_row_count,
+            "merged_row_count": self.merged_row_count,
+            "latest_open_row_count": self.latest_open_row_count,
+            "merge_results": [result.to_dict() for result in self.merge_results],
+            "warnings": self.warnings,
+        }
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -1127,6 +1232,480 @@ def plan_startup_backfill(
     return plans
 
 
+def rest_klines_url(
+    *,
+    base_url: str,
+    symbol: str,
+    interval: str,
+    start_time: int | None,
+    end_time: int | None,
+    limit: int,
+) -> str:
+    validate_interval(interval)
+    params: dict[str, Any] = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": int(limit),
+    }
+    if start_time is not None:
+        params["startTime"] = int(start_time)
+    if end_time is not None:
+        params["endTime"] = int(end_time)
+    query = urllib.parse.urlencode(params)
+    return base_url.rstrip("/") + REST_KLINES_PATH + "?" + query
+
+
+def fetch_rest_klines(
+    *,
+    symbol: str,
+    interval: str,
+    start_time: int | None,
+    end_time: int | None,
+    limit: int = 1500,
+    base_url: str = BINANCE_REST_BASE_URL,
+    timeout: float = 15,
+    max_retries: int = 5,
+    backoff_base_seconds: float = 1,
+    backoff_max_seconds: float = 60,
+    opener: Any | None = None,
+    sleep_func: Any | None = None,
+) -> RestFetchResult:
+    """Fetch Binance USD-M Futures Klines with Phase 4 backoff semantics."""
+    url = rest_klines_url(
+        base_url=base_url,
+        symbol=symbol,
+        interval=interval,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+    )
+    open_func = opener or urllib.request.urlopen
+    sleeper = sleep_func or time.sleep
+    attempts = 0
+    while True:
+        request = urllib.request.Request(url, headers={"User-Agent": "crypto-data-hub-live-update/0.1"})
+        try:
+            with open_func(request, timeout=timeout) as response:
+                data = response.read()
+            rows = json.loads(data.decode("utf-8"))
+            if not isinstance(rows, list):
+                return RestFetchResult("error", [], url, error="REST response is not a list")
+            return RestFetchResult("ok", rows, url, http_status=200)
+        except urllib.error.HTTPError as exc:
+            body = _read_http_error_body(exc)
+            if exc.code == 418:
+                raise RestStopRequests(f"HTTP 418 from Binance REST: {body}")
+            if exc.code == 429 or 500 <= exc.code <= 599:
+                if attempts >= max_retries:
+                    return RestFetchResult(
+                        "retry_exhausted",
+                        [],
+                        url,
+                        http_status=exc.code,
+                        error=body or str(exc),
+                    )
+                _sleep_backoff(sleeper, attempts, backoff_base_seconds, backoff_max_seconds)
+                attempts += 1
+                continue
+            if exc.code in (400, 404) and _looks_invalid_symbol(body):
+                return RestFetchResult(
+                    "symbol_unavailable",
+                    [],
+                    url,
+                    http_status=exc.code,
+                    error=body or str(exc),
+                )
+            return RestFetchResult(
+                "error",
+                [],
+                url,
+                http_status=exc.code,
+                error=body or str(exc),
+            )
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+            if attempts >= max_retries:
+                return RestFetchResult(
+                    "retry_exhausted",
+                    [],
+                    url,
+                    error=str(exc),
+                )
+            _sleep_backoff(sleeper, attempts, backoff_base_seconds, backoff_max_seconds)
+            attempts += 1
+
+
+def _read_http_error_body(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw = exc.read()
+    except Exception:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return repr(raw)
+
+
+def _looks_invalid_symbol(body: str) -> bool:
+    lowered = body.lower()
+    return "-1121" in body or "invalid symbol" in lowered or "symbol" in lowered
+
+
+def _sleep_backoff(
+    sleep_func: Any,
+    attempt: int,
+    base_seconds: float,
+    max_seconds: float,
+) -> None:
+    delay = min(float(max_seconds), float(base_seconds) * (2 ** int(attempt)))
+    sleep_func(delay)
+
+
+def rest_row_to_kline_event(
+    row: list[Any],
+    *,
+    symbol: str,
+    interval: str,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> RestKlineEvent:
+    if len(row) < 11:
+        raise LiveUpdateCommandError(f"REST kline row has fewer than 11 fields: {row!r}")
+    open_time = int(row[0])
+    close_time = int(row[6])
+    fields = datetime_fields(open_time)
+    record = KlineRecord.build(
+        symbol=symbol,
+        interval=interval,
+        open_time=open_time,
+        open=float(row[1]),
+        high=float(row[2]),
+        low=float(row[3]),
+        close=float(row[4]),
+        volume=float(row[5]),
+        close_time=close_time,
+        quote_volume=float(row[7]),
+        trade_count=int(row[8]),
+        taker_buy_base_volume=float(row[9]),
+        taker_buy_quote_volume=float(row[10]),
+        source_archive=REST_SOURCE_ARCHIVE,
+        archive_source=REST_ARCHIVE_SOURCE,
+        archive_period=fields["date"],
+    )
+    return RestKlineEvent(
+        record=record,
+        is_closed=close_time <= int(now_ms) - int(close_lag_ms),
+        raw_row=row,
+    )
+
+
+def write_event_buffer(
+    paths: LiveUpdatePaths,
+    event: RestKlineEvent,
+    *,
+    received_at_utc: str,
+) -> None:
+    record = event.record
+    append_jsonl(
+        paths.buffer_jsonl(record.interval, "event_buffer", record.date),
+        {
+            "received_at_utc": received_at_utc,
+            "source": "rest_fallback",
+            "record_key": record.record_key().as_dict(),
+            "validation_errors": [],
+            "payload": event.raw_row,
+        },
+    )
+
+
+def write_closed_buffer(
+    paths: LiveUpdatePaths,
+    event: RestKlineEvent,
+    *,
+    closed_at_utc: str,
+) -> None:
+    record = event.record
+    append_jsonl(
+        paths.closed_buffer_jsonl(record.interval, record.date),
+        {
+            "closed_at_utc": closed_at_utc,
+            "source": REST_ARCHIVE_SOURCE,
+            "schema_version": SCHEMA_VERSION,
+            "record": record.logical_dict(),
+        },
+    )
+
+
+def write_latest(
+    paths: LiveUpdatePaths,
+    event: RestKlineEvent,
+    *,
+    updated_at_utc: str,
+) -> None:
+    record = event.record
+    latest_record = record.logical_dict()
+    latest_record["is_closed"] = event.is_closed
+    write_json_atomic(
+        paths.latest_json(record.interval, record.symbol),
+        {
+            "updated_at_utc": updated_at_utc,
+            "source": REST_ARCHIVE_SOURCE,
+            "record": latest_record,
+            "validation_errors": [],
+        },
+    )
+
+
+def _merge_closed_records_by_partition(
+    records: list[KlineRecord],
+    paths: LiveUpdatePaths,
+) -> list[ParquetMergeResult]:
+    by_partition: dict[PartitionKey, list[KlineRecord]] = {}
+    for record in records:
+        by_partition.setdefault(record.partition_key(), []).append(record)
+    results: list[ParquetMergeResult] = []
+    for key in sorted(by_partition, key=lambda k: k.as_tuple()):
+        ordered = sorted(by_partition[key], key=lambda rec: rec.open_time)
+        results.append(merge_records_to_current_partition(ordered, paths))
+    return results
+
+
+def run_rest_backfill_for_plan(
+    plan: MissingBarsPlan,
+    state: LiveUpdateState,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+    rest_api_limit: int = 1500,
+    base_url: str = BINANCE_REST_BASE_URL,
+    timeout: float = 15,
+    max_retries: int = 5,
+    backoff_base_seconds: float = 1,
+    backoff_max_seconds: float = 60,
+    opener: Any | None = None,
+    sleep_func: Any | None = None,
+) -> RestBackfillResult:
+    """Execute REST backfill for one Phase 3 gap plan."""
+    resolver = paths or LiveUpdatePaths()
+    if plan.status != "missing" or plan.start_open_time is None or plan.end_open_time is None:
+        return RestBackfillResult(
+            symbol=plan.symbol,
+            interval=plan.interval,
+            status=plan.status,
+            requested_start_open_time=plan.start_open_time,
+            requested_end_open_time=plan.end_open_time,
+            fetched_row_count=0,
+            event_row_count=0,
+            closed_row_count=0,
+            merged_row_count=0,
+            latest_open_row_count=0,
+            merge_results=[],
+            warnings=[],
+        )
+
+    warnings: list[str] = []
+    closed_records: list[KlineRecord] = []
+    fetched_count = 0
+    event_count = 0
+    latest_open_count = 0
+    cursor = int(plan.start_open_time)
+    interval_ms = interval_milliseconds(plan.interval)
+
+    while cursor <= int(plan.end_open_time):
+        fetch = fetch_rest_klines(
+            symbol=plan.symbol,
+            interval=plan.interval,
+            start_time=cursor,
+            end_time=plan.end_open_time,
+            limit=rest_api_limit,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+            backoff_base_seconds=backoff_base_seconds,
+            backoff_max_seconds=backoff_max_seconds,
+            opener=opener,
+            sleep_func=sleep_func,
+        )
+        if fetch.status == "symbol_unavailable":
+            warning = f"symbol unavailable for REST backfill: {plan.symbol}"
+            warnings.append(warning)
+            write_warning_log(resolver, plan.interval, warning)
+            return _rest_result_from_counts(plan, "symbol_unavailable", fetched_count, event_count, closed_records, [], latest_open_count, warnings)
+        if fetch.status != "ok":
+            warning = f"REST fetch failed for {plan.symbol} {plan.interval}: {fetch.status} {fetch.error or ''}".strip()
+            warnings.append(warning)
+            write_warning_log(resolver, plan.interval, warning)
+            return _rest_result_from_counts(plan, fetch.status, fetched_count, event_count, closed_records, [], latest_open_count, warnings)
+        if not fetch.rows:
+            warning = f"empty REST response for {plan.symbol} {plan.interval} at {cursor}"
+            warnings.append(warning)
+            write_warning_log(resolver, plan.interval, warning)
+            break
+
+        fetched_count += len(fetch.rows)
+        events: list[RestKlineEvent] = [
+            rest_row_to_kline_event(
+                row,
+                symbol=plan.symbol,
+                interval=plan.interval,
+                now_ms=now_ms,
+                close_lag_ms=close_lag_ms,
+            )
+            for row in fetch.rows
+        ]
+        for event in events:
+            timestamp = utc_now()
+            write_event_buffer(resolver, event, received_at_utc=timestamp)
+            write_latest(resolver, event, updated_at_utc=timestamp)
+            event_count += 1
+            if event.is_closed:
+                write_closed_buffer(resolver, event, closed_at_utc=timestamp)
+                mark_symbol_buffered(state, event.record.symbol, event.record.open_time, now_utc=timestamp)
+                closed_records.append(event.record)
+            else:
+                latest_open_count += 1
+
+        last_open = max(event.record.open_time for event in events)
+        next_cursor = last_open + interval_ms
+        if next_cursor <= cursor:
+            warning = f"REST cursor did not advance for {plan.symbol} {plan.interval}"
+            warnings.append(warning)
+            write_warning_log(resolver, plan.interval, warning)
+            break
+        cursor = next_cursor
+
+    merge_results = _merge_closed_records_by_partition(closed_records, resolver)
+    for merge_result in merge_results:
+        apply_flush_result_to_state(
+            state,
+            merge_result.partition_key.symbol,
+            merge_result,
+            closed_at_utc=utc_now(),
+        )
+    if merge_results:
+        save_live_update_state(state, resolver)
+    return _rest_result_from_counts(
+        plan,
+        "ok" if not warnings else "ok_with_warnings",
+        fetched_count,
+        event_count,
+        closed_records,
+        merge_results,
+        latest_open_count,
+        warnings,
+    )
+
+
+def _rest_result_from_counts(
+    plan: MissingBarsPlan,
+    status: str,
+    fetched_count: int,
+    event_count: int,
+    closed_records: list[KlineRecord],
+    merge_results: list[ParquetMergeResult],
+    latest_open_count: int,
+    warnings: list[str],
+) -> RestBackfillResult:
+    return RestBackfillResult(
+        symbol=plan.symbol,
+        interval=plan.interval,
+        status=status,
+        requested_start_open_time=plan.start_open_time,
+        requested_end_open_time=plan.end_open_time,
+        fetched_row_count=fetched_count,
+        event_row_count=event_count,
+        closed_row_count=len(closed_records),
+        merged_row_count=sum(result.input_row_count for result in merge_results),
+        latest_open_row_count=latest_open_count,
+        merge_results=merge_results,
+        warnings=warnings,
+    )
+
+
+def run_startup_backfill_once(
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+    rest_api_limit: int = 1500,
+    base_url: str = BINANCE_REST_BASE_URL,
+    timeout: float = 15,
+    max_retries: int = 5,
+    backoff_base_seconds: float = 1,
+    backoff_max_seconds: float = 60,
+    opener: Any | None = None,
+    sleep_func: Any | None = None,
+) -> list[RestBackfillResult]:
+    """Run Phase 4 startup backfill once; no long-running runtime is started."""
+    resolver = paths or LiveUpdatePaths()
+    startup_plans = plan_startup_backfill(
+        intervals,
+        symbols,
+        resolver,
+        now_ms=now_ms,
+        close_lag_ms=close_lag_ms,
+    )
+    results: list[RestBackfillResult] = []
+    for interval_plan in startup_plans:
+        state = load_live_update_state(interval_plan.interval, resolver)
+        assert state is not None
+        try:
+            for symbol_plan in interval_plan.plans:
+                results.append(
+                    run_rest_backfill_for_plan(
+                        symbol_plan,
+                        state,
+                        resolver,
+                        now_ms=now_ms,
+                        close_lag_ms=close_lag_ms,
+                        rest_api_limit=rest_api_limit,
+                        base_url=base_url,
+                        timeout=timeout,
+                        max_retries=max_retries,
+                        backoff_base_seconds=backoff_base_seconds,
+                        backoff_max_seconds=backoff_max_seconds,
+                        opener=opener,
+                        sleep_func=sleep_func,
+                    )
+                )
+        except RestStopRequests as exc:
+            write_warning_log(resolver, interval_plan.interval, str(exc), level="critical")
+            results.append(
+                RestBackfillResult(
+                    symbol="*",
+                    interval=interval_plan.interval,
+                    status="rest_stopped",
+                    requested_start_open_time=None,
+                    requested_end_open_time=None,
+                    fetched_row_count=0,
+                    event_row_count=0,
+                    closed_row_count=0,
+                    merged_row_count=0,
+                    latest_open_row_count=0,
+                    merge_results=[],
+                    warnings=[str(exc)],
+                )
+            )
+            break
+    return results
+
+
+def run_gap_repair_once(
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    **kwargs: Any,
+) -> list[RestBackfillResult]:
+    """Callable Phase 4 gap repair skeleton.
+
+    Gap repair uses the same state-driven one-shot REST backfill path. Scheduling
+    and long-running managers belong to later phases.
+    """
+    return run_startup_backfill_once(intervals, symbols, paths, **kwargs)
+
+
 def parse_symbols_arg(value: str | None) -> list[str]:
     if not value:
         return []
@@ -1148,6 +1727,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default="")
     parser.add_argument("--close-lag-ms", type=int, default=2000)
     parser.add_argument("--now-ms", type=int, default=None)
+    parser.add_argument("--binance-rest-base-url", default=BINANCE_REST_BASE_URL)
+    parser.add_argument("--rest-api-limit", type=int, default=1500)
+    parser.add_argument("--http-timeout", type=float, default=15)
+    parser.add_argument("--rest-max-retries", type=int, default=5)
+    parser.add_argument("--rest-backoff-base-seconds", type=float, default=1)
+    parser.add_argument("--rest-backoff-max-seconds", type=float, default=60)
     parser.add_argument("--current-dataset-root", default=str(DEFAULT_CURRENT_DATASET_ROOT))
     parser.add_argument("--seed-dataset-root", default=str(DEFAULT_SEED_DATASET_ROOT))
     parser.add_argument(
@@ -1164,6 +1749,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--plan-startup-backfill",
         action="store_true",
         help="calculate Phase 3 startup-backfill gaps without calling REST",
+    )
+    parser.add_argument(
+        "--run-startup-backfill-once",
+        action="store_true",
+        help="run Phase 4 REST startup backfill once and exit",
     )
     return parser
 
@@ -1224,10 +1814,41 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload), end="")
         return 0
+    if args.run_startup_backfill_once:
+        symbols = parse_symbols_arg(args.symbols)
+        if not symbols:
+            raise LiveUpdateCommandError(
+                "--symbols is required for Phase 4 startup backfill"
+            )
+        now_ms = args.now_ms
+        if now_ms is None:
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        results = run_startup_backfill_once(
+            intervals,
+            symbols,
+            paths,
+            now_ms=now_ms,
+            close_lag_ms=args.close_lag_ms,
+            rest_api_limit=args.rest_api_limit,
+            base_url=args.binance_rest_base_url,
+            timeout=args.http_timeout,
+            max_retries=args.rest_max_retries,
+            backoff_base_seconds=args.rest_backoff_base_seconds,
+            backoff_max_seconds=args.rest_backoff_max_seconds,
+        )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "results": [result.to_dict() for result in results],
+        }
+        print(pretty_json(payload), end="")
+        return 0
     print(
-        "Phase 3 scaffold ready: "
+        "Phase 4 scaffold ready: "
         f"active_intervals={','.join(intervals)}; "
-        "REST/WebSocket/webhook/runtime phases are not implemented yet."
+        "WebSocket/webhook/full runtime phases are not implemented yet."
     )
     return 0
 

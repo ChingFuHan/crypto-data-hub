@@ -1,11 +1,13 @@
 """Phase 1 tests for Binance UM Kline live-update primitives."""
 
 from pathlib import Path
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 
 from datahub import live_update as lu
 
@@ -167,6 +169,47 @@ def make_record(open_time, *, close=1.5, source="live_websocket:kline"):
         source_archive=source,
         archive_source=source.split(":", 1)[0],
         archive_period="2021-12-06",
+    )
+
+
+def rest_row(open_time, *, close=1.5):
+    return [
+        open_time,
+        "1.0",
+        str(max(2.0, close)),
+        "0.5",
+        str(close),
+        "10.0",
+        open_time + lu.interval_milliseconds("1m") - 1,
+        "15.0",
+        3,
+        "5.0",
+        "7.5",
+        "0",
+    ]
+
+
+class FakeHttpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def http_error(code, body):
+    return urllib.error.HTTPError(
+        url="https://example.test/fapi/v1/klines",
+        code=code,
+        msg="error",
+        hdrs={},
+        fp=io.BytesIO(body.encode("utf-8")),
     )
 
 
@@ -514,6 +557,291 @@ class ScriptPhase3Tests(unittest.TestCase):
             self.assertEqual(payload["active_intervals"], ["1m"])
             self.assertEqual(payload["plans"][0]["plans"][0]["symbol"], "BTCUSDT")
             self.assertEqual(payload["plans"][0]["plans"][0]["status"], "bootstrap_required")
+
+
+class RestFetcherTests(unittest.TestCase):
+    def test_rest_url_uses_required_klines_parameters(self):
+        url = lu.rest_klines_url(
+            base_url="https://fapi.binance.com",
+            symbol="btcusdt",
+            interval="1m",
+            start_time=1000,
+            end_time=2000,
+            limit=500,
+        )
+        self.assertIn("/fapi/v1/klines?", url)
+        self.assertIn("symbol=BTCUSDT", url)
+        self.assertIn("interval=1m", url)
+        self.assertIn("startTime=1000", url)
+        self.assertIn("endTime=2000", url)
+        self.assertIn("limit=500", url)
+
+    def test_fetch_rest_klines_retries_429_then_succeeds(self):
+        calls = []
+        sleeps = []
+
+        def opener(request, timeout):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                raise http_error(429, '{"code":-1003,"msg":"rate limit"}')
+            return FakeHttpResponse([rest_row(1638747600000)])
+
+        result = lu.fetch_rest_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_time=1638747600000,
+            end_time=1638747600000,
+            opener=opener,
+            sleep_func=sleeps.append,
+            backoff_base_seconds=2,
+            max_retries=2,
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [2.0])
+
+    def test_fetch_rest_klines_418_stops_requests(self):
+        def opener(request, timeout):
+            raise http_error(418, '{"code":-1003,"msg":"banned"}')
+
+        with self.assertRaises(lu.RestStopRequests):
+            lu.fetch_rest_klines(
+                symbol="BTCUSDT",
+                interval="1m",
+                start_time=1,
+                end_time=1,
+                opener=opener,
+                sleep_func=lambda _: None,
+            )
+
+    def test_fetch_rest_klines_invalid_symbol_is_nonfatal(self):
+        def opener(request, timeout):
+            raise http_error(400, '{"code":-1121,"msg":"Invalid symbol."}')
+
+        result = lu.fetch_rest_klines(
+            symbol="BADUSDT",
+            interval="1m",
+            start_time=1,
+            end_time=1,
+            opener=opener,
+            sleep_func=lambda _: None,
+        )
+
+        self.assertEqual(result.status, "symbol_unavailable")
+
+    def test_fetch_rest_klines_5xx_exhaustion_uses_backoff(self):
+        sleeps = []
+
+        def opener(request, timeout):
+            raise http_error(500, '{"msg":"server error"}')
+
+        result = lu.fetch_rest_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_time=1,
+            end_time=1,
+            opener=opener,
+            sleep_func=sleeps.append,
+            max_retries=2,
+            backoff_base_seconds=1,
+        )
+
+        self.assertEqual(result.status, "retry_exhausted")
+        self.assertEqual(result.http_status, 500)
+        self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_fetch_rest_klines_timeout_exhaustion_uses_backoff(self):
+        sleeps = []
+
+        def opener(request, timeout):
+            raise urllib.error.URLError("timed out")
+
+        result = lu.fetch_rest_klines(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_time=1,
+            end_time=1,
+            opener=opener,
+            sleep_func=sleeps.append,
+            max_retries=1,
+            backoff_base_seconds=3,
+        )
+
+        self.assertEqual(result.status, "retry_exhausted")
+        self.assertEqual(sleeps, [3.0])
+
+    def test_rest_row_normalization_identifies_unclosed_bar(self):
+        row = rest_row(1638747600000)
+        event = lu.rest_row_to_kline_event(
+            row,
+            symbol="btcusdt",
+            interval="1m",
+            now_ms=1638747659999,
+            close_lag_ms=2000,
+        )
+
+        self.assertEqual(event.record.symbol, "BTCUSDT")
+        self.assertEqual(event.record.archive_source, "live_rest")
+        self.assertFalse(event.is_closed)
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 4 parquet tests")
+class RestBackfillFlowTests(unittest.TestCase):
+    def test_run_rest_backfill_for_plan_writes_buffers_merges_and_updates_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+            plan = lu.MissingBarsPlan(
+                symbol="BTCUSDT",
+                interval="1m",
+                last_closed_open_time=1638747480000,
+                latest_closed_open_time=1638747660000,
+                missing_bars=3,
+                start_open_time=1638747540000,
+                end_open_time=1638747660000,
+                source="state",
+                status="missing",
+            )
+
+            def opener(request, timeout):
+                return FakeHttpResponse([
+                    rest_row(1638747540000, close=1.5),
+                    rest_row(1638747600000, close=2.5),
+                    rest_row(1638747660000, close=3.5),
+                ])
+
+            result = lu.run_rest_backfill_for_plan(
+                plan,
+                state,
+                paths,
+                now_ms=1638747785000,
+                rest_api_limit=1500,
+                opener=opener,
+                sleep_func=lambda _: None,
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.event_row_count, 3)
+            self.assertEqual(result.closed_row_count, 3)
+            self.assertEqual(result.merged_row_count, 3)
+            self.assertEqual(state.symbols["BTCUSDT"].last_closed_open_time, 1638747660000)
+            self.assertTrue(paths.buffer_jsonl("1m", "event_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertTrue(result.merge_results[0].target_path.exists())
+            self.assertTrue(paths.state_json("1m").exists())
+
+    def test_unclosed_rest_bar_updates_event_and_latest_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+            plan = lu.MissingBarsPlan(
+                symbol="BTCUSDT",
+                interval="1m",
+                last_closed_open_time=1638747480000,
+                latest_closed_open_time=1638747540000,
+                missing_bars=1,
+                start_open_time=1638747540000,
+                end_open_time=1638747540000,
+                source="state",
+                status="missing",
+            )
+
+            def opener(request, timeout):
+                return FakeHttpResponse([rest_row(1638747540000)])
+
+            result = lu.run_rest_backfill_for_plan(
+                plan,
+                state,
+                paths,
+                now_ms=1638747541000,
+                close_lag_ms=2000,
+                opener=opener,
+                sleep_func=lambda _: None,
+            )
+
+            self.assertEqual(result.closed_row_count, 0)
+            self.assertEqual(result.latest_open_row_count, 1)
+            self.assertTrue(paths.buffer_jsonl("1m", "event_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertFalse(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertFalse(paths.current_parquet_root("1m").exists())
+            self.assertIsNone(state.symbols.get("BTCUSDT"))
+
+    def test_empty_rest_response_records_warning_and_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+            plan = lu.MissingBarsPlan(
+                symbol="BTCUSDT",
+                interval="1m",
+                last_closed_open_time=1638747480000,
+                latest_closed_open_time=1638747540000,
+                missing_bars=1,
+                start_open_time=1638747540000,
+                end_open_time=1638747540000,
+                source="state",
+                status="missing",
+            )
+
+            result = lu.run_rest_backfill_for_plan(
+                plan,
+                state,
+                paths,
+                now_ms=1638747785000,
+                opener=lambda request, timeout: FakeHttpResponse([]),
+                sleep_func=lambda _: None,
+            )
+
+            self.assertEqual(result.status, "ok_with_warnings")
+            self.assertIn("empty REST response", result.warnings[0])
+            self.assertTrue(paths.runtime_log("1m", lu.utc_now()[:10], "warnings.log").exists())
+
+    def test_run_startup_backfill_once_stops_on_418(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            state = lu.LiveUpdateState.create("1m", paths)
+            state.symbol_state("BTCUSDT").last_closed_open_time = 1638747480000
+            lu.save_live_update_state(state, paths)
+
+            def opener(request, timeout):
+                raise http_error(418, '{"code":-1003,"msg":"banned"}')
+
+            results = lu.run_startup_backfill_once(
+                ("1m",),
+                ["BTCUSDT"],
+                paths,
+                now_ms=1638747785000,
+                opener=opener,
+                sleep_func=lambda _: None,
+            )
+
+            self.assertEqual(results[-1].status, "rest_stopped")
+            self.assertTrue(results[-1].warnings)
+
+
+class ScriptPhase4Tests(unittest.TestCase):
+    def test_script_run_startup_backfill_once_requires_symbols(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/live_update.py",
+                "--interval",
+                "1m",
+                "--run-startup-backfill-once",
+                "--now-ms",
+                "1638747785000",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--symbols is required", result.stderr)
 
 
 if __name__ == "__main__":
