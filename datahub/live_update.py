@@ -1,17 +1,18 @@
-"""Phase 1-5 primitives for Binance UM Kline live update.
+"""Phase 1-6 primitives for Binance UM Kline live update.
 
-This module intentionally stops at the Phase 5 boundary from ``LIVE_UPDATE.md``:
+This module intentionally stops at the Phase 6 boundary from ``LIVE_UPDATE.md``:
 data structures, normalized ``KlineRecord`` values, supported interval helpers,
 deterministic path construction/parsing, current dataset initialization, and
 atomic per-partition Parquet merge, state management, and startup-backfill gap
-planning, REST fallback, and testable WebSocket manager primitives. Runtime
-behavior such as webhook serving, full CLI modes, and long-running production
-orchestration belongs to later phases.
+planning, REST fallback, testable WebSocket manager primitives, and webhook
+server primitives. Full CLI modes and long-running production orchestration
+belong to later phases.
 """
 
 from __future__ import annotations
 
 import argparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import shutil
 import socket
@@ -46,6 +47,11 @@ REST_ARCHIVE_SOURCE = "live_rest"
 BINANCE_WS_BASE_URL = "wss://fstream.binance.com"
 WS_SOURCE_ARCHIVE = "live_websocket:kline"
 WS_ARCHIVE_SOURCE = "live_websocket"
+WEBHOOK_SOURCE_ARCHIVE = "live_webhook:kline"
+WEBHOOK_ARCHIVE_SOURCE = "live_webhook"
+DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+DEFAULT_WEBHOOK_PORT = 8787
+DEFAULT_WEBHOOK_MAX_BODY_BYTES = 1_048_576
 
 SUPPORTED_INTERVALS: tuple[str, ...] = ("1m", "3m", "5m", "15m", "1h", "4h", "1d")
 CLI_INTERVALS: tuple[str, ...] = ("all",) + SUPPORTED_INTERVALS
@@ -727,6 +733,7 @@ class WebSocketProcessResult:
     open_time: int
     is_closed: bool
     merge_result: ParquetMergeResult | None = None
+    validation_errors: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -736,6 +743,8 @@ class WebSocketProcessResult:
             "open_time": self.open_time,
             "is_closed": self.is_closed,
         }
+        if self.validation_errors:
+            payload["validation_errors"] = self.validation_errors
         if self.merge_result:
             payload["merge_result"] = self.merge_result.to_dict()
         return payload
@@ -772,6 +781,68 @@ class WebSocketReconnectResult:
             "status": self.status,
             "reconnect_count": self.reconnect_count,
             "rest_results": [result.to_dict() for result in self.rest_results],
+        }
+
+
+@dataclass(frozen=True)
+class WebhookKlineEvent:
+    """Normalized webhook Kline event."""
+
+    record: KlineRecord
+    is_closed: bool
+    raw_payload: dict[str, Any]
+    payload_format: str
+
+
+@dataclass(frozen=True)
+class WebhookProcessResult:
+    """Outcome of processing one webhook payload."""
+
+    status: str
+    symbol: str
+    interval: str
+    open_time: int
+    is_closed: bool
+    validation_errors: list[str]
+    merge_result: ParquetMergeResult | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "status": self.status,
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "open_time": self.open_time,
+            "is_closed": self.is_closed,
+        }
+        if self.validation_errors:
+            payload["errors"] = self.validation_errors
+        if self.merge_result:
+            payload["merge_result"] = self.merge_result.to_dict()
+        return payload
+
+
+@dataclass(frozen=True)
+class WebhookServerConfig:
+    """Configuration for the Phase 6 webhook HTTP server primitive."""
+
+    requested_interval: str
+    active_intervals: tuple[str, ...]
+    paths: LiveUpdatePaths
+    host: str = DEFAULT_WEBHOOK_HOST
+    port: int = DEFAULT_WEBHOOK_PORT
+    max_body_bytes: int = DEFAULT_WEBHOOK_MAX_BODY_BYTES
+    close_lag_ms: int = 2000
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "host": self.host,
+            "port": self.port,
+            "requested_interval": self.requested_interval,
+            "active_intervals": list(self.active_intervals),
+            "live_root": str(self.paths._rooted(self.paths.live_root)),
+            "current_dataset_root": str(self.paths._rooted(self.paths.current_dataset_root)),
+            "max_body_bytes": self.max_body_bytes,
+            "close_lag_ms": self.close_lag_ms,
         }
 
 
@@ -1447,6 +1518,49 @@ def _sleep_backoff(
     sleep_func(delay)
 
 
+def validate_live_kline_record(record: KlineRecord, *, is_closed: bool) -> list[str]:
+    """Return shared live-update Kline validation errors.
+
+    This is intentionally small and source-agnostic so REST, WebSocket, and
+    webhook payloads go through the same record-level gate before any closed bar
+    can update the current historical dataset.
+    """
+    errors: list[str] = []
+    interval_ms = interval_milliseconds(record.interval)
+    if not record.symbol:
+        errors.append("symbol is required")
+    if record.open_time < 0:
+        errors.append("open_time must be non-negative")
+    if record.open_time % interval_ms != 0:
+        errors.append("open_time is not aligned to interval")
+    expected_close_time = record.open_time + interval_ms - 1
+    if record.close_time != expected_close_time:
+        errors.append(
+            f"close_time mismatch: expected {expected_close_time}, got {record.close_time}"
+        )
+    if record.high < max(record.open, record.close, record.low):
+        errors.append("OHLC invalid: high is below open/close/low")
+    if record.low > min(record.open, record.close, record.high):
+        errors.append("OHLC invalid: low is above open/close/high")
+    if record.volume < 0:
+        errors.append("volume must be non-negative")
+    if record.quote_volume < 0:
+        errors.append("quote_volume must be non-negative")
+    if record.trade_count < 0:
+        errors.append("trade_count must be non-negative")
+    if record.taker_buy_base_volume < 0:
+        errors.append("taker_buy_base_volume must be non-negative")
+    if record.taker_buy_quote_volume < 0:
+        errors.append("taker_buy_quote_volume must be non-negative")
+    if is_closed and record.close_time < record.open_time:
+        errors.append("closed Kline close_time must be >= open_time")
+    return errors
+
+
+def _event_validation_errors(event: Any) -> list[str]:
+    return validate_live_kline_record(event.record, is_closed=bool(event.is_closed))
+
+
 def rest_row_to_kline_event(
     row: list[Any],
     *,
@@ -1490,6 +1604,7 @@ def write_event_buffer(
     event: RestKlineEvent,
     *,
     received_at_utc: str,
+    validation_errors: list[str] | None = None,
 ) -> None:
     record = event.record
     append_jsonl(
@@ -1498,7 +1613,7 @@ def write_event_buffer(
             "received_at_utc": received_at_utc,
             "source": "rest_fallback",
             "record_key": record.record_key().as_dict(),
-            "validation_errors": [],
+            "validation_errors": validation_errors or [],
             "payload": event.raw_row,
         },
     )
@@ -1506,7 +1621,7 @@ def write_event_buffer(
 
 def write_closed_buffer(
     paths: LiveUpdatePaths,
-    event: RestKlineEvent,
+    event: Any,
     *,
     closed_at_utc: str,
     source: str = REST_ARCHIVE_SOURCE,
@@ -1525,10 +1640,11 @@ def write_closed_buffer(
 
 def write_latest(
     paths: LiveUpdatePaths,
-    event: RestKlineEvent,
+    event: Any,
     *,
     updated_at_utc: str,
     source: str = REST_ARCHIVE_SOURCE,
+    validation_errors: list[str] | None = None,
 ) -> None:
     record = event.record
     latest_record = record.logical_dict()
@@ -1539,7 +1655,30 @@ def write_latest(
             "updated_at_utc": updated_at_utc,
             "source": source,
             "record": latest_record,
-            "validation_errors": [],
+            "validation_errors": validation_errors or [],
+        },
+    )
+
+
+def write_reject(
+    paths: LiveUpdatePaths,
+    *,
+    interval: str,
+    source: str,
+    errors: list[str],
+    payload: Any,
+    rejected_at_utc: str,
+    record: KlineRecord | None = None,
+) -> None:
+    reject_date = record.date if record else rejected_at_utc[:10]
+    append_jsonl(
+        paths.rejects_jsonl(interval, reject_date),
+        {
+            "rejected_at_utc": rejected_at_utc,
+            "source": source,
+            "errors": errors,
+            "record": record.logical_dict() if record else None,
+            "payload": payload,
         },
     )
 
@@ -1644,9 +1783,37 @@ def run_rest_backfill_for_plan(
         ]
         for event in events:
             timestamp = utc_now()
-            write_event_buffer(resolver, event, received_at_utc=timestamp)
-            write_latest(resolver, event, updated_at_utc=timestamp)
+            validation_errors = _event_validation_errors(event)
+            write_event_buffer(
+                resolver,
+                event,
+                received_at_utc=timestamp,
+                validation_errors=validation_errors,
+            )
+            write_latest(
+                resolver,
+                event,
+                updated_at_utc=timestamp,
+                validation_errors=validation_errors,
+            )
             event_count += 1
+            if validation_errors:
+                warning = (
+                    f"REST validation failed for {event.record.symbol} "
+                    f"{event.record.interval} {event.record.open_time}: "
+                    + "; ".join(validation_errors)
+                )
+                warnings.append(warning)
+                write_reject(
+                    resolver,
+                    interval=event.record.interval,
+                    source="rest_fallback",
+                    errors=validation_errors,
+                    payload=event.raw_row,
+                    rejected_at_utc=timestamp,
+                    record=event.record,
+                )
+                continue
             if event.is_closed:
                 write_closed_buffer(resolver, event, closed_at_utc=timestamp)
                 mark_symbol_buffered(state, event.record.symbol, event.record.open_time, now_utc=timestamp)
@@ -1881,19 +2048,23 @@ def unwrap_websocket_payload(payload: str | dict[str, Any]) -> tuple[str | None,
     return None, payload
 
 
-def websocket_payload_to_event(payload: str | dict[str, Any]) -> WebSocketKlineEvent:
-    stream, data = unwrap_websocket_payload(payload)
+def _kline_record_from_binance_payload(
+    data: dict[str, Any],
+    *,
+    source_archive: str,
+    archive_source: str,
+) -> KlineRecord:
     if data.get("e") != "kline" or not isinstance(data.get("k"), dict):
-        raise LiveUpdateCommandError("WebSocket payload is not a kline event")
+        raise LiveUpdateCommandError("payload is not a Binance kline event")
     kline = data["k"]
     symbol = str(kline.get("s") or data.get("s") or "").upper()
     interval = str(kline.get("i") or "")
     if not symbol:
-        raise LiveUpdateCommandError("WebSocket kline payload has no symbol")
+        raise LiveUpdateCommandError("Binance kline payload has no symbol")
     validate_interval(interval)
     open_time = int(kline["t"])
     fields = datetime_fields(open_time)
-    record = KlineRecord.build(
+    return KlineRecord.build(
         symbol=symbol,
         interval=interval,
         open_time=open_time,
@@ -1907,15 +2078,30 @@ def websocket_payload_to_event(payload: str | dict[str, Any]) -> WebSocketKlineE
         trade_count=int(kline["n"]),
         taker_buy_base_volume=float(kline["V"]),
         taker_buy_quote_volume=float(kline["Q"]),
-        source_archive=WS_SOURCE_ARCHIVE,
-        archive_source=WS_ARCHIVE_SOURCE,
+        source_archive=source_archive,
+        archive_source=archive_source,
         archive_period=fields["date"],
     )
+
+
+def _binance_payload_is_closed(data: dict[str, Any]) -> bool:
+    if not isinstance(data.get("k"), dict):
+        raise LiveUpdateCommandError("payload is not a Binance kline event")
+    return bool(data["k"].get("x"))
+
+
+def websocket_payload_to_event(payload: str | dict[str, Any]) -> WebSocketKlineEvent:
+    stream, data = unwrap_websocket_payload(payload)
+    record = _kline_record_from_binance_payload(
+        data,
+        source_archive=WS_SOURCE_ARCHIVE,
+        archive_source=WS_ARCHIVE_SOURCE,
+    )
     if stream is None:
-        stream = websocket_stream_name(symbol, interval)
+        stream = websocket_stream_name(record.symbol, record.interval)
     return WebSocketKlineEvent(
         record=record,
-        is_closed=bool(kline.get("x")),
+        is_closed=_binance_payload_is_closed(data),
         raw_payload=data,
         stream=stream,
     )
@@ -1926,6 +2112,7 @@ def write_websocket_buffer(
     event: WebSocketKlineEvent,
     *,
     received_at_utc: str,
+    validation_errors: list[str] | None = None,
 ) -> None:
     record = event.record
     append_jsonl(
@@ -1935,7 +2122,7 @@ def write_websocket_buffer(
             "source": "websocket",
             "stream": event.stream,
             "record_key": record.record_key().as_dict(),
-            "validation_errors": [],
+            "validation_errors": validation_errors or [],
             "payload": event.raw_payload,
         },
     )
@@ -1956,12 +2143,44 @@ def process_websocket_kline_event(
             f"WebSocket event interval {record.interval} does not match state {state.interval}"
         )
 
-    write_websocket_buffer(resolver, event, received_at_utc=timestamp)
-    write_latest(resolver, event, updated_at_utc=timestamp, source="websocket")
+    validation_errors = _event_validation_errors(event)
+    write_websocket_buffer(
+        resolver,
+        event,
+        received_at_utc=timestamp,
+        validation_errors=validation_errors,
+    )
+    write_latest(
+        resolver,
+        event,
+        updated_at_utc=timestamp,
+        source="websocket",
+        validation_errors=validation_errors,
+    )
     symbol_state = state.symbol_state(record.symbol)
     symbol_state.last_ws_message_at_utc = timestamp
     state.websocket["last_message_at_utc"] = timestamp
     state.updated_at_utc = timestamp
+
+    if validation_errors:
+        write_reject(
+            resolver,
+            interval=record.interval,
+            source="websocket",
+            errors=validation_errors,
+            payload=event.raw_payload,
+            rejected_at_utc=timestamp,
+            record=record,
+        )
+        save_live_update_state(state, resolver, now_utc=timestamp)
+        return WebSocketProcessResult(
+            status="rejected",
+            symbol=record.symbol,
+            interval=record.interval,
+            open_time=record.open_time,
+            is_closed=event.is_closed,
+            validation_errors=validation_errors,
+        )
 
     if not event.is_closed:
         save_live_update_state(state, resolver, now_utc=timestamp)
@@ -2006,6 +2225,269 @@ def process_websocket_message(
         event,
         state,
         paths,
+        received_at_utc=received_at_utc,
+    )
+
+
+def _json_object_payload(payload: bytes | str | dict[str, Any], *, label: str) -> dict[str, Any]:
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        raise LiveUpdateCommandError(f"{label} payload must be a JSON object")
+    return payload
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return bool(value)
+
+
+def _normalized_payload_to_webhook_event(
+    payload: dict[str, Any],
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> WebhookKlineEvent:
+    required = (
+        "symbol",
+        "interval",
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_volume",
+        "trade_count",
+        "taker_buy_base_volume",
+        "taker_buy_quote_volume",
+    )
+    missing = [field for field in required if field not in payload]
+    if missing:
+        raise LiveUpdateCommandError(
+            "normalized webhook payload missing fields: " + ", ".join(missing)
+        )
+    open_time = int(payload["open_time"])
+    close_time = int(payload["close_time"])
+    fields = datetime_fields(open_time)
+    record = KlineRecord.build(
+        symbol=str(payload["symbol"]),
+        interval=str(payload["interval"]),
+        open_time=open_time,
+        open=float(payload["open"]),
+        high=float(payload["high"]),
+        low=float(payload["low"]),
+        close=float(payload["close"]),
+        volume=float(payload["volume"]),
+        close_time=close_time,
+        quote_volume=float(payload["quote_volume"]),
+        trade_count=int(payload["trade_count"]),
+        taker_buy_base_volume=float(payload["taker_buy_base_volume"]),
+        taker_buy_quote_volume=float(payload["taker_buy_quote_volume"]),
+        source_archive=WEBHOOK_SOURCE_ARCHIVE,
+        archive_source=WEBHOOK_ARCHIVE_SOURCE,
+        archive_period=fields["date"],
+    )
+    provided_is_closed = _optional_bool(payload.get("is_closed"))
+    is_closed = (
+        close_time <= int(now_ms) - int(close_lag_ms)
+        if provided_is_closed is None
+        else provided_is_closed
+    )
+    return WebhookKlineEvent(
+        record=record,
+        is_closed=is_closed,
+        raw_payload=payload,
+        payload_format="normalized",
+    )
+
+
+def webhook_payload_to_event(
+    payload: bytes | str | dict[str, Any],
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> WebhookKlineEvent:
+    data = _json_object_payload(payload, label="webhook")
+    if "data" in data and "stream" in data:
+        wrapped = data["data"]
+        if not isinstance(wrapped, dict):
+            raise LiveUpdateCommandError("combined webhook data must be an object")
+        record = _kline_record_from_binance_payload(
+            wrapped,
+            source_archive=WEBHOOK_SOURCE_ARCHIVE,
+            archive_source=WEBHOOK_ARCHIVE_SOURCE,
+        )
+        return WebhookKlineEvent(
+            record=record,
+            is_closed=_binance_payload_is_closed(wrapped),
+            raw_payload=data,
+            payload_format="binance_combined",
+        )
+    if data.get("e") == "kline" and isinstance(data.get("k"), dict):
+        record = _kline_record_from_binance_payload(
+            data,
+            source_archive=WEBHOOK_SOURCE_ARCHIVE,
+            archive_source=WEBHOOK_ARCHIVE_SOURCE,
+        )
+        return WebhookKlineEvent(
+            record=record,
+            is_closed=_binance_payload_is_closed(data),
+            raw_payload=data,
+            payload_format="binance_raw",
+        )
+    return _normalized_payload_to_webhook_event(
+        data,
+        now_ms=now_ms,
+        close_lag_ms=close_lag_ms,
+    )
+
+
+def write_webhook_buffer(
+    paths: LiveUpdatePaths,
+    event: WebhookKlineEvent,
+    *,
+    received_at_utc: str,
+    validation_errors: list[str] | None = None,
+) -> None:
+    record = event.record
+    append_jsonl(
+        paths.buffer_jsonl(record.interval, "webhook_buffer", record.date),
+        {
+            "received_at_utc": received_at_utc,
+            "source": "webhook",
+            "payload_format": event.payload_format,
+            "record_key": record.record_key().as_dict(),
+            "validation_errors": validation_errors or [],
+            "payload": event.raw_payload,
+        },
+    )
+
+
+def process_webhook_kline_event(
+    event: WebhookKlineEvent,
+    state: LiveUpdateState,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    received_at_utc: str | None = None,
+) -> WebhookProcessResult:
+    resolver = paths or LiveUpdatePaths()
+    timestamp = received_at_utc or utc_now()
+    record = event.record
+    if record.interval != state.interval:
+        raise LiveUpdateCommandError(
+            f"webhook event interval {record.interval} does not match state {state.interval}"
+        )
+
+    validation_errors = _event_validation_errors(event)
+    write_webhook_buffer(
+        resolver,
+        event,
+        received_at_utc=timestamp,
+        validation_errors=validation_errors,
+    )
+    write_latest(
+        resolver,
+        event,
+        updated_at_utc=timestamp,
+        source="webhook",
+        validation_errors=validation_errors,
+    )
+
+    if validation_errors:
+        write_reject(
+            resolver,
+            interval=record.interval,
+            source="webhook",
+            errors=validation_errors,
+            payload=event.raw_payload,
+            rejected_at_utc=timestamp,
+            record=record,
+        )
+        return WebhookProcessResult(
+            status="rejected",
+            symbol=record.symbol,
+            interval=record.interval,
+            open_time=record.open_time,
+            is_closed=event.is_closed,
+            validation_errors=validation_errors,
+        )
+
+    if not event.is_closed:
+        return WebhookProcessResult(
+            status="accepted",
+            symbol=record.symbol,
+            interval=record.interval,
+            open_time=record.open_time,
+            is_closed=False,
+            validation_errors=[],
+        )
+
+    write_closed_buffer(resolver, event, closed_at_utc=timestamp, source="webhook")
+    mark_symbol_buffered(state, record.symbol, record.open_time, now_utc=timestamp)
+    merge_result = merge_records_to_current_partition([record], resolver)
+    apply_flush_result_to_state(
+        state,
+        record.symbol,
+        merge_result,
+        closed_at_utc=timestamp,
+        now_utc=timestamp,
+    )
+    save_live_update_state(state, resolver, now_utc=timestamp)
+    return WebhookProcessResult(
+        status="merged",
+        symbol=record.symbol,
+        interval=record.interval,
+        open_time=record.open_time,
+        is_closed=True,
+        validation_errors=[],
+        merge_result=merge_result,
+    )
+
+
+def process_webhook_payload(
+    payload: bytes | str | dict[str, Any],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    active_intervals: tuple[str, ...] | None = None,
+    now_ms: int | None = None,
+    close_lag_ms: int = 2000,
+    received_at_utc: str | None = None,
+) -> WebhookProcessResult:
+    resolver = paths or LiveUpdatePaths()
+    timestamp_ms = (
+        int(datetime.now(timezone.utc).timestamp() * 1000)
+        if now_ms is None
+        else int(now_ms)
+    )
+    event = webhook_payload_to_event(
+        payload,
+        now_ms=timestamp_ms,
+        close_lag_ms=close_lag_ms,
+    )
+    if active_intervals is not None and event.record.interval not in active_intervals:
+        raise LiveUpdateCommandError(
+            f"webhook interval {event.record.interval} is not active"
+        )
+    state = load_live_update_state(event.record.interval, resolver)
+    if state is None:
+        state = LiveUpdateState.create(event.record.interval, resolver)
+    return process_webhook_kline_event(
+        event,
+        state,
+        resolver,
         received_at_utc=received_at_utc,
     )
 
@@ -2140,6 +2622,106 @@ def plan_websocket_rotation(
     )
 
 
+def webhook_health_payload(config: WebhookServerConfig) -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "interval": config.requested_interval,
+        "active_intervals": list(config.active_intervals),
+        "live_root": str(config.paths._rooted(config.paths.live_root)),
+        "current_dataset_root": str(config.paths._rooted(config.paths.current_dataset_root)),
+    }
+
+
+class LiveUpdateWebhookRequestHandler(BaseHTTPRequestHandler):
+    """Minimal Phase 6 webhook HTTP handler.
+
+    It is exposed as a primitive for tests and later runtime wiring. This phase
+    intentionally does not start a production daemon from the default CLI path.
+    """
+
+    server_version = "crypto-data-hub-live-update-webhook/0.1"
+
+    def log_message(self, format: str, *args: Any) -> None:  # pragma: no cover
+        return
+
+    @property
+    def webhook_config(self) -> WebhookServerConfig:
+        return self.server.webhook_config  # type: ignore[attr-defined]
+
+    def _write_json_response(self, status_code: int, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        if self.path != "/healthz":
+            self._write_json_response(404, {"status": "not_found"})
+            return
+        self._write_json_response(200, webhook_health_payload(self.webhook_config))
+
+    def do_POST(self) -> None:
+        if self.path != "/webhook/kline":
+            self._write_json_response(404, {"status": "not_found"})
+            return
+        config = self.webhook_config
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self._write_json_response(
+                411,
+                {"status": "rejected", "errors": ["Content-Length is required"]},
+            )
+            return
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self._write_json_response(
+                400,
+                {"status": "rejected", "errors": ["invalid Content-Length"]},
+            )
+            return
+        if length > config.max_body_bytes:
+            self._write_json_response(
+                413,
+                {
+                    "status": "rejected",
+                    "errors": [
+                        f"payload too large: {length} bytes > {config.max_body_bytes}"
+                    ],
+                },
+            )
+            return
+        body = self.rfile.read(length)
+        try:
+            result = process_webhook_payload(
+                body,
+                config.paths,
+                active_intervals=config.active_intervals,
+                close_lag_ms=config.close_lag_ms,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, LiveUpdateCommandError) as exc:
+            self._write_json_response(
+                400,
+                {"status": "rejected", "errors": [str(exc)]},
+            )
+            return
+        status_code = 422 if result.status == "rejected" else 200
+        self._write_json_response(status_code, result.to_dict())
+
+
+def build_webhook_server(config: WebhookServerConfig) -> ThreadingHTTPServer:
+    if config.max_body_bytes <= 0:
+        raise LiveUpdateCommandError("webhook max body bytes must be positive")
+    server = ThreadingHTTPServer(
+        (config.host, int(config.port)),
+        LiveUpdateWebhookRequestHandler,
+    )
+    server.webhook_config = config  # type: ignore[attr-defined]
+    return server
+
+
 def parse_symbols_arg(value: str | None) -> list[str]:
     if not value:
         return []
@@ -2154,7 +2736,7 @@ def parse_symbols_arg(value: str | None) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1-5 live-update layout, state, REST, and WebSocket tools.",
+        description="Phase 1-6 live-update layout, state, REST, WebSocket, and webhook tools.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
@@ -2170,6 +2752,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--binance-ws-base-url", default=BINANCE_WS_BASE_URL)
     parser.add_argument("--ws-batch-size", type=int, default=100)
     parser.add_argument("--max-streams-per-connection", type=int, default=1024)
+    parser.add_argument("--webhook-host", default=DEFAULT_WEBHOOK_HOST)
+    parser.add_argument("--webhook-port", type=int, default=DEFAULT_WEBHOOK_PORT)
+    parser.add_argument("--webhook-max-body-bytes", type=int, default=DEFAULT_WEBHOOK_MAX_BODY_BYTES)
+    parser.add_argument("--disable-webhook", action="store_true")
     parser.add_argument("--current-dataset-root", default=str(DEFAULT_CURRENT_DATASET_ROOT))
     parser.add_argument("--seed-dataset-root", default=str(DEFAULT_SEED_DATASET_ROOT))
     parser.add_argument(
@@ -2196,6 +2782,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--describe-websocket-connections",
         action="store_true",
         help="print Phase 5 combined stream connection specs and exit",
+    )
+    parser.add_argument(
+        "--describe-webhook-server",
+        action="store_true",
+        help="print Phase 6 webhook server config and health payload, then exit",
     )
     return parser
 
@@ -2312,10 +2903,33 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload), end="")
         return 0
+    if args.describe_webhook_server:
+        config = WebhookServerConfig(
+            requested_interval=args.interval,
+            active_intervals=intervals,
+            paths=paths,
+            host=args.webhook_host,
+            port=args.webhook_port,
+            max_body_bytes=args.webhook_max_body_bytes,
+            close_lag_ms=args.close_lag_ms,
+        )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "webhook_enabled": not args.disable_webhook,
+            "server": config.to_dict(),
+            "healthz": webhook_health_payload(config),
+            "endpoints": {
+                "healthz": "GET /healthz",
+                "kline": "POST /webhook/kline",
+            },
+        }
+        print(pretty_json(payload), end="")
+        return 0
     print(
-        "Phase 5 scaffold ready: "
+        "Phase 6 scaffold ready: "
         f"active_intervals={','.join(intervals)}; "
-        "webhook/full runtime phases are not implemented yet."
+        "full runtime CLI modes are not implemented yet."
     )
     return 0
 

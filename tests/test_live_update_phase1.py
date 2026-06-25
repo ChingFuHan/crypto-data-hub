@@ -6,8 +6,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
+import urllib.request
 
 from datahub import live_update as lu
 
@@ -214,6 +216,35 @@ def ws_payload(open_time, *, interval="1m", closed=False, symbol="BTCUSDT", clos
             "B": "0",
         },
     }
+
+
+def normalized_payload(
+    open_time,
+    *,
+    interval="1m",
+    closed=False,
+    symbol="BTCUSDT",
+    close=1.5,
+    include_is_closed=True,
+):
+    payload = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "open_time": open_time,
+        "open": "1.0",
+        "high": str(max(2.0, close)),
+        "low": "0.5",
+        "close": str(close),
+        "volume": "10.0",
+        "close_time": open_time + lu.interval_milliseconds(interval) - 1,
+        "quote_volume": "15.0",
+        "trade_count": 3,
+        "taker_buy_base_volume": "5.0",
+        "taker_buy_quote_volume": "7.5",
+    }
+    if include_is_closed:
+        payload["is_closed"] = closed
+    return payload
 
 
 class FakeHttpResponse:
@@ -1095,6 +1126,225 @@ class ScriptPhase5Tests(unittest.TestCase):
             self.assertEqual(payload["stream_count"], 7)
             self.assertEqual(payload["connection_count"], 3)
             self.assertIn("/market/stream?streams=", payload["connections"][0]["url"])
+
+
+class WebhookPayloadTests(unittest.TestCase):
+    def test_webhook_parses_raw_combined_and_normalized_payloads(self):
+        raw = lu.webhook_payload_to_event(
+            ws_payload(1638747600000, closed=True),
+            now_ms=1638747785000,
+        )
+        combined = lu.webhook_payload_to_event(
+            {
+                "stream": "btcusdt@kline_1m",
+                "data": ws_payload(1638747600000, closed=False),
+            },
+            now_ms=1638747785000,
+        )
+        normalized = lu.webhook_payload_to_event(
+            normalized_payload(1638747600000, closed=True),
+            now_ms=1638747785000,
+        )
+
+        self.assertEqual(raw.payload_format, "binance_raw")
+        self.assertTrue(raw.is_closed)
+        self.assertEqual(raw.record.archive_source, "live_webhook")
+        self.assertEqual(combined.payload_format, "binance_combined")
+        self.assertFalse(combined.is_closed)
+        self.assertEqual(normalized.payload_format, "normalized")
+        self.assertTrue(normalized.is_closed)
+
+    def test_normalized_payload_without_is_closed_derives_from_close_time(self):
+        event = lu.webhook_payload_to_event(
+            normalized_payload(
+                1638747600000,
+                include_is_closed=False,
+            ),
+            now_ms=1638747785000,
+            close_lag_ms=2000,
+        )
+
+        self.assertTrue(event.is_closed)
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 6 closed webhook tests")
+class WebhookProcessingTests(unittest.TestCase):
+    def test_open_webhook_bar_updates_webhook_buffer_and_latest_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+
+            result = lu.process_webhook_payload(
+                normalized_payload(1638747600000, closed=False),
+                paths,
+                active_intervals=("1m",),
+                now_ms=1638747601000,
+                received_at_utc="2026-06-26T00:00:00Z",
+            )
+
+            self.assertEqual(result.status, "accepted")
+            self.assertFalse(result.is_closed)
+            self.assertTrue(paths.buffer_jsonl("1m", "webhook_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertFalse(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertFalse(paths.current_parquet_root("1m").exists())
+            self.assertFalse(paths.state_json("1m").exists())
+
+    def test_closed_webhook_bar_writes_closed_buffer_then_merges_and_updates_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+
+            result = lu.process_webhook_payload(
+                normalized_payload(1638747600000, closed=True, close=6.5),
+                paths,
+                active_intervals=("1m",),
+                now_ms=1638747785000,
+                received_at_utc="2026-06-26T00:01:00Z",
+            )
+
+            self.assertEqual(result.status, "merged")
+            self.assertTrue(paths.buffer_jsonl("1m", "webhook_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertIsNotNone(result.merge_result)
+            rows = pq.ParquetFile(result.merge_result.target_path).read().to_pylist()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["close"], 6.5)
+            self.assertEqual(rows[0]["archive_source"], "live_webhook")
+            loaded = lu.load_live_update_state("1m", paths)
+            self.assertEqual(loaded.symbols["BTCUSDT"].last_closed_open_time, 1638747600000)
+            closed_line = paths.closed_buffer_jsonl("1m", "2021-12-06").read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(json.loads(closed_line)["source"], "webhook")
+
+    def test_invalid_webhook_payload_is_rejected_before_closed_buffer_or_merge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            payload = normalized_payload(1638747600000, closed=True, close=3.0)
+            payload["high"] = "2.0"
+
+            result = lu.process_webhook_payload(
+                payload,
+                paths,
+                active_intervals=("1m",),
+                now_ms=1638747785000,
+                received_at_utc="2026-06-26T00:02:00Z",
+            )
+
+            self.assertEqual(result.status, "rejected")
+            self.assertIn("OHLC invalid", result.validation_errors[0])
+            self.assertTrue(paths.buffer_jsonl("1m", "webhook_buffer", "2021-12-06").exists())
+            self.assertTrue(paths.latest_json("1m", "BTCUSDT").exists())
+            self.assertTrue(paths.rejects_jsonl("1m", "2021-12-06").exists())
+            self.assertFalse(paths.closed_buffer_jsonl("1m", "2021-12-06").exists())
+            self.assertFalse(paths.current_parquet_root("1m").exists())
+
+
+class WebhookServerPrimitiveTests(unittest.TestCase):
+    def test_health_payload_uses_loopback_defaults_and_active_intervals(self):
+        paths = lu.LiveUpdatePaths(repo_root=Path("/repo"))
+        config = lu.WebhookServerConfig(
+            requested_interval="all",
+            active_intervals=lu.SUPPORTED_INTERVALS,
+            paths=paths,
+        )
+
+        self.assertEqual(config.host, "127.0.0.1")
+        self.assertEqual(config.port, 8787)
+        payload = lu.webhook_health_payload(config)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["interval"], "all")
+        self.assertEqual(payload["active_intervals"], list(lu.SUPPORTED_INTERVALS))
+
+    def test_http_health_and_open_post_work_without_production_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            config = lu.WebhookServerConfig(
+                requested_interval="1m",
+                active_intervals=("1m",),
+                paths=paths,
+                port=0,
+            )
+            server = lu.build_webhook_server(config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                with urllib.request.urlopen(f"http://{host}:{port}/healthz") as response:
+                    health = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(health["status"], "ok")
+
+                body = json.dumps(normalized_payload(1638747600000, closed=False)).encode("utf-8")
+                request = urllib.request.Request(
+                    f"http://{host}:{port}/webhook/kline",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+                self.assertEqual(result["status"], "accepted")
+                self.assertFalse(result["is_closed"])
+                self.assertTrue(paths.buffer_jsonl("1m", "webhook_buffer", "2021-12-06").exists())
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+    def test_http_post_rejects_payload_over_size_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            config = lu.WebhookServerConfig(
+                requested_interval="1m",
+                active_intervals=("1m",),
+                paths=paths,
+                port=0,
+                max_body_bytes=8,
+            )
+            server = lu.build_webhook_server(config)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                host, port = server.server_address
+                request = urllib.request.Request(
+                    f"http://{host}:{port}/webhook/kline",
+                    data=b'{"too":"large"}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(request)
+                self.assertEqual(ctx.exception.code, 413)
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+
+
+class ScriptPhase6Tests(unittest.TestCase):
+    def test_script_describe_webhook_server_outputs_health_without_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/live_update.py",
+                    "--repo-root",
+                    tmp,
+                    "--interval",
+                    "all",
+                    "--describe-webhook-server",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["webhook_enabled"])
+            self.assertEqual(payload["server"]["host"], "127.0.0.1")
+            self.assertEqual(payload["server"]["port"], 8787)
+            self.assertEqual(payload["healthz"]["active_intervals"], list(lu.SUPPORTED_INTERVALS))
+            self.assertEqual(payload["endpoints"]["kline"], "POST /webhook/kline")
 
 
 if __name__ == "__main__":
