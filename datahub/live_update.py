@@ -2722,40 +2722,115 @@ def build_webhook_server(config: WebhookServerConfig) -> ThreadingHTTPServer:
     return server
 
 
-def parse_symbols_arg(value: str | None) -> list[str]:
-    if not value:
-        return []
+def resolve_symbols(
+    symbols_arg: str,
+    symbols_file_arg: str,
+    max_symbols: int,
+    base_url: str = BINANCE_REST_BASE_URL,
+    timeout: float = 15.0,
+) -> list[str]:
     symbols: list[str] = []
-    for chunk in value.replace(",", " ").split():
-        symbol = chunk.strip().upper()
-        if symbol:
-            symbols.append(symbol)
+
+    # 1. --symbols
+    if symbols_arg:
+        for chunk in symbols_arg.replace(",", " ").split():
+            symbol = chunk.strip().upper()
+            if symbol:
+                symbols.append(symbol)
+        if symbols:
+            if max_symbols > 0:
+                return symbols[:max_symbols]
+            return symbols
+
+    # 2. --symbols-file
+    if symbols_file_arg:
+        path = Path(symbols_file_arg)
+        if not path.is_file():
+            raise LiveUpdateCommandError(f"symbols file not found: {symbols_file_arg}")
+        lines = path.read_text("utf-8").splitlines()
+        for line in lines:
+            line = line.strip().upper()
+            if line and not line.startswith("#"):
+                symbols.append(line)
+        if symbols:
+            if max_symbols > 0:
+                return symbols[:max_symbols]
+            return symbols
+
+    # 3. exchangeInfo
+    url = urllib.parse.urljoin(base_url, "/fapi/v1/exchangeInfo")
+    req = urllib.request.Request(url, headers={"User-Agent": "crypto-data-hub/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise LiveUpdateCommandError(f"failed to fetch exchangeInfo: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise LiveUpdateCommandError(f"invalid exchangeInfo JSON: {exc}") from exc
+
+    for s in payload.get("symbols", []):
+        if s.get("status") == "TRADING" and s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT":
+            symbols.append(s["symbol"].upper())
+
+    symbols.sort()
+    if max_symbols > 0:
+        return symbols[:max_symbols]
     return symbols
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1-6 live-update layout, state, REST, WebSocket, and webhook tools.",
+        description="Phase 1-7 live-update layout, state, REST, WebSocket, webhook tools, and CLI skeleton.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
     parser.add_argument("--symbols", default="")
+    parser.add_argument("--symbols-file", default="")
+    parser.add_argument("--max-symbols", type=int, default=0)
+    parser.add_argument("--lookback-bars", type=int, default=3)
+    parser.add_argument("--poll-seconds", type=int, default=65)
+    parser.add_argument("--request-delay", type=float, default=0.02)
     parser.add_argument("--close-lag-ms", type=int, default=2000)
     parser.add_argument("--now-ms", type=int, default=None)
     parser.add_argument("--binance-rest-base-url", default=BINANCE_REST_BASE_URL)
-    parser.add_argument("--rest-api-limit", type=int, default=1500)
     parser.add_argument("--http-timeout", type=float, default=15)
-    parser.add_argument("--rest-max-retries", type=int, default=5)
-    parser.add_argument("--rest-backoff-base-seconds", type=float, default=1)
-    parser.add_argument("--rest-backoff-max-seconds", type=float, default=60)
     parser.add_argument("--binance-ws-base-url", default=BINANCE_WS_BASE_URL)
-    parser.add_argument("--ws-batch-size", type=int, default=100)
-    parser.add_argument("--max-streams-per-connection", type=int, default=1024)
     parser.add_argument("--webhook-host", default=DEFAULT_WEBHOOK_HOST)
     parser.add_argument("--webhook-port", type=int, default=DEFAULT_WEBHOOK_PORT)
     parser.add_argument("--webhook-max-body-bytes", type=int, default=DEFAULT_WEBHOOK_MAX_BODY_BYTES)
+
     parser.add_argument("--disable-webhook", action="store_true")
+    parser.add_argument("--disable-websocket", action="store_true")
+    parser.add_argument("--disable-rest-fallback", action="store_true")
+    parser.add_argument("--disable-startup-backfill", action="store_true")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--quiet-http", action="store_true")
+
+    parser.add_argument("--ws-batch-size", type=int, default=100)
+    parser.add_argument("--max-streams-per-connection", type=int, default=1024)
+    parser.add_argument("--max-total-streams", type=int, default=0)
+    parser.add_argument("--startup-batch-size", type=int, default=5)
+    parser.add_argument("--startup-batch-delay", type=float, default=1)
+    parser.add_argument("--ws-stale-multiplier", type=int, default=3)
+    parser.add_argument("--ws-reconnect-max-retries", type=int, default=10)
+    parser.add_argument("--ws-reconnect-backoff-seconds", type=float, default=5)
+    parser.add_argument("--ws-connection-rotate-hours", type=int, default=23)
+
+    parser.add_argument("--rest-api-limit", type=int, default=1500)
+    parser.add_argument("--rest-max-retries", type=int, default=5)
+    parser.add_argument("--rest-backoff-base-seconds", type=float, default=1)
+    parser.add_argument("--rest-backoff-max-seconds", type=float, default=60)
+
+    parser.add_argument("--gap-repair-seconds", type=int, default=300)
+    parser.add_argument("--flush-seconds", type=int, default=10)
+    parser.add_argument("--flush-max-rows", type=int, default=1000)
+    parser.add_argument("--buffer-retention-days", type=int, default=30)
+    parser.add_argument("--closed-buffer-retention-days", type=int, default=0)
+    parser.add_argument("--compress-old-buffers", action="store_true")
+    parser.add_argument("--check-continuity", action="store_true")
+
     parser.add_argument("--current-dataset-root", default=str(DEFAULT_CURRENT_DATASET_ROOT))
     parser.add_argument("--seed-dataset-root", default=str(DEFAULT_SEED_DATASET_ROOT))
     parser.add_argument(
@@ -2791,6 +2866,118 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_once_mode(
+    args: argparse.Namespace,
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths,
+    now_ms: int,
+) -> int:
+    print("1. expand intervals")
+    print("2. load symbols")
+    print("3. initialize current dataset")
+    ensure_current_datasets(intervals, paths)
+
+    print("4. execute startup backfill")
+    if not args.disable_startup_backfill:
+        run_startup_backfill_once(
+            intervals,
+            symbols,
+            paths,
+            now_ms=now_ms,
+            close_lag_ms=args.close_lag_ms,
+            rest_api_limit=args.rest_api_limit,
+            base_url=args.binance_rest_base_url,
+            timeout=args.http_timeout,
+            max_retries=args.rest_max_retries,
+            backoff_base_seconds=args.rest_backoff_base_seconds,
+            backoff_max_seconds=args.rest_backoff_max_seconds,
+        )
+
+    print("5. [skeleton] if no gap, fetch lookback_bars")
+    print("6. [skeleton] enqueue closed KBar")
+    print("7. [skeleton] forced flush all partition queues")
+    print("8. [skeleton] flush successful, update state")
+    if args.check_continuity:
+        print("9. [skeleton] run continuity check")
+    print("10. program exit")
+    return 0
+
+
+def run_orchestration_skeleton(
+    args: argparse.Namespace,
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths,
+    now_ms: int,
+) -> int:
+    print("5. initialize current dataset for each interval")
+    ensure_current_datasets(intervals, paths)
+
+    print("6. startup backfill for each symbol + interval")
+    if not args.disable_startup_backfill:
+        run_startup_backfill_once(
+            intervals,
+            symbols,
+            paths,
+            now_ms=now_ms,
+            close_lag_ms=args.close_lag_ms,
+            rest_api_limit=args.rest_api_limit,
+            base_url=args.binance_rest_base_url,
+            timeout=args.http_timeout,
+            max_retries=args.rest_max_retries,
+            backoff_base_seconds=args.rest_backoff_base_seconds,
+            backoff_max_seconds=args.rest_backoff_max_seconds,
+        )
+    else:
+        print("WARNING: startup backfill is disabled. Data might be incomplete.")
+
+    print("7. start partition writers (skeleton)")
+    print("8. start webhook server (skeleton)")
+    if args.disable_webhook:
+        print("webhook disabled.")
+
+    print("9. start WebSocket manager (skeleton)")
+    if args.disable_websocket:
+        print("websocket disabled.")
+
+    print("10. start REST fallback manager (skeleton)")
+    if args.disable_rest_fallback:
+        print("WARNING: REST fallback disabled. Data gaps might occur.")
+
+    print("11. start retention manager (skeleton)")
+    print("12. handle shutdown signals (skeleton)")
+
+    import threading
+    import signal
+
+    stop_event = threading.Event()
+    def sig_handler(signum: int, frame: Any) -> None:
+        print(f"Received signal {signum}, stopping...")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    try:
+        while not stop_event.is_set():
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        stop_event.set()
+
+    print("stop event set")
+    print("stop WebSocket manager")
+    print("stop REST fallback manager")
+    print("stop webhook server")
+    print("forced flush all partition queues")
+    print("flush successful, update state")
+    print("shutdown webhook server")
+    print("server_close")
+    print("flush pending writes")
+    print("stopped message")
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     intervals = expand_intervals(args.interval)
     paths = LiveUpdatePaths(
@@ -2822,15 +3009,25 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload), end="")
         return 0
+
+    # All other commands require symbol resolution
+    symbols = resolve_symbols(
+        args.symbols,
+        args.symbols_file,
+        args.max_symbols,
+        base_url=args.binance_rest_base_url,
+        timeout=args.http_timeout,
+    )
+
+    now_ms = args.now_ms
+    if now_ms is None:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
     if args.plan_startup_backfill:
-        symbols = parse_symbols_arg(args.symbols)
         if not symbols:
             raise LiveUpdateCommandError(
-                "--symbols is required for Phase 3 startup backfill planning"
+                "--symbols or exchangeInfo is required for Phase 3 startup backfill planning"
             )
-        now_ms = args.now_ms
-        if now_ms is None:
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         plans = plan_startup_backfill(
             intervals,
             symbols,
@@ -2848,15 +3045,11 @@ def run(args: argparse.Namespace) -> int:
         print(pretty_json(payload), end="")
         return 0
     if args.run_startup_backfill_once:
-        symbols = parse_symbols_arg(args.symbols)
         if not symbols:
             raise LiveUpdateCommandError(
-                "--symbols is required for Phase 4 startup backfill"
+                "--symbols or exchangeInfo is required for Phase 4 startup backfill"
             )
-        now_ms = args.now_ms
-        if now_ms is None:
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        results = run_startup_backfill_once(
+        results_backfill = run_startup_backfill_once(
             intervals,
             symbols,
             paths,
@@ -2869,20 +3062,19 @@ def run(args: argparse.Namespace) -> int:
             backoff_base_seconds=args.rest_backoff_base_seconds,
             backoff_max_seconds=args.rest_backoff_max_seconds,
         )
-        payload = {
+        payload_backfill = {
             "schema_version": SCHEMA_VERSION,
             "dataset_version": DATASET_VERSION,
             "requested_interval": args.interval,
             "active_intervals": list(intervals),
-            "results": [result.to_dict() for result in results],
+            "results": [result.to_dict() for result in results_backfill],
         }
-        print(pretty_json(payload), end="")
+        print(pretty_json(payload_backfill), end="")
         return 0
     if args.describe_websocket_connections:
-        symbols = parse_symbols_arg(args.symbols)
         if not symbols:
             raise LiveUpdateCommandError(
-                "--symbols is required for Phase 5 WebSocket connection planning"
+                "--symbols or exchangeInfo is required for Phase 5 WebSocket connection planning"
             )
         specs = build_websocket_connection_specs(
             symbols,
@@ -2891,7 +3083,7 @@ def run(args: argparse.Namespace) -> int:
             max_streams_per_connection=args.max_streams_per_connection,
             base_url=args.binance_ws_base_url,
         )
-        payload = {
+        payload_ws = {
             "schema_version": SCHEMA_VERSION,
             "dataset_version": DATASET_VERSION,
             "requested_interval": args.interval,
@@ -2901,7 +3093,7 @@ def run(args: argparse.Namespace) -> int:
             "stream_count": sum(len(spec.streams) for spec in specs),
             "connections": [spec.to_dict() for spec in specs],
         }
-        print(pretty_json(payload), end="")
+        print(pretty_json(payload_ws), end="")
         return 0
     if args.describe_webhook_server:
         config = WebhookServerConfig(
@@ -2913,7 +3105,7 @@ def run(args: argparse.Namespace) -> int:
             max_body_bytes=args.webhook_max_body_bytes,
             close_lag_ms=args.close_lag_ms,
         )
-        payload = {
+        payload_wh = {
             "schema_version": SCHEMA_VERSION,
             "dataset_version": DATASET_VERSION,
             "webhook_enabled": not args.disable_webhook,
@@ -2924,14 +3116,40 @@ def run(args: argparse.Namespace) -> int:
                 "kline": "POST /webhook/kline",
             },
         }
-        print(pretty_json(payload), end="")
+        print(pretty_json(payload_wh), end="")
         return 0
-    print(
-        "Phase 6 scaffold ready: "
-        f"active_intervals={','.join(intervals)}; "
-        "full runtime CLI modes are not implemented yet."
-    )
-    return 0
+
+    # Live update default run
+    print("1. parse CLI")
+    print("2. expand intervals")
+    print("3. load symbols")
+    stream_count = len(symbols) * len(intervals)
+    if args.max_total_streams > 0 and stream_count > args.max_total_streams:
+        raise LiveUpdateCommandError(f"stream_count ({stream_count}) exceeds max_total_streams ({args.max_total_streams})")
+
+    import math
+    connection_count = math.ceil(stream_count / args.ws_batch_size) if args.ws_batch_size > 0 else 0
+
+    summary = {
+        "symbols_count": len(symbols),
+        "intervals_count": len(intervals),
+        "stream_count": stream_count,
+        "connection_count": connection_count,
+        "ws_batch_size": args.ws_batch_size,
+        "max_streams_per_connection": args.max_streams_per_connection,
+        "estimated_partition_count": len(symbols) * len(intervals),
+        "startup_backfill_enabled": not args.disable_startup_backfill,
+        "rest_fallback_enabled": not args.disable_rest_fallback,
+        "websocket_enabled": not args.disable_websocket,
+        "webhook_enabled": not args.disable_webhook,
+    }
+    print("4. print startup summary")
+    print(pretty_json({"startup_summary": summary}), end="")
+
+    if args.once:
+        return run_once_mode(args, intervals, symbols, paths, now_ms)
+
+    return run_orchestration_skeleton(args, intervals, symbols, paths, now_ms)
 
 
 def main(argv: list[str] | None = None) -> int:
