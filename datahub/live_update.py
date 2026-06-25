@@ -1,12 +1,12 @@
-"""Phase 1-6 primitives for Binance UM Kline live update.
+"""Phase 1-8 primitives for Binance UM Kline live update.
 
-This module intentionally stops at the Phase 6 boundary from ``LIVE_UPDATE.md``:
+This module intentionally stops at the Phase 8 boundary from ``LIVE_UPDATE.md``:
 data structures, normalized ``KlineRecord`` values, supported interval helpers,
 deterministic path construction/parsing, current dataset initialization, and
 atomic per-partition Parquet merge, state management, and startup-backfill gap
-planning, REST fallback, testable WebSocket manager primitives, and webhook
-server primitives. Full CLI modes and long-running production orchestration
-belong to later phases.
+planning, REST fallback, testable WebSocket manager primitives, webhook
+server primitives, CLI modes, and continuity checks / acceptance validation.
+Full long-running production orchestration belongs to later hardening.
 """
 
 from __future__ import annotations
@@ -2622,6 +2622,257 @@ def plan_websocket_rotation(
     )
 
 
+@dataclass(frozen=True)
+class ContinuityCheckResult:
+    """Phase 8 continuity check outcome for one symbol + interval.
+
+    Reports row count, open_time range, duplicate / missing / misaligned /
+    close_time-mismatch counts, the latest closed open_time derived from the
+    clock, the lag in bars, and an overall status. ``status`` is ``ok`` when
+    the series is continuous, ``gap_detected`` when any duplicate, missing,
+    misaligned, or close_time-mismatch is found, and ``empty`` when the
+    current dataset has no rows for this symbol + interval.
+    """
+
+    symbol: str
+    interval: str
+    rows: int
+    min_open_time: int | None
+    max_open_time: int | None
+    duplicate_count: int
+    missing_count: int
+    latest_closed_open_time: int
+    lag_bars: int | None
+    status: str
+    misaligned_count: int = 0
+    close_time_mismatch_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "rows": self.rows,
+            "min_open_time": self.min_open_time,
+            "max_open_time": self.max_open_time,
+            "duplicate_count": self.duplicate_count,
+            "missing_count": self.missing_count,
+            "latest_closed_open_time": self.latest_closed_open_time,
+            "lag_bars": self.lag_bars,
+            "status": self.status,
+            "misaligned_count": self.misaligned_count,
+            "close_time_mismatch_count": self.close_time_mismatch_count,
+        }
+
+
+def read_current_symbol_open_times(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+) -> list[tuple[int, int]]:
+    """Read ``(open_time, close_time)`` rows for one symbol from the current dataset.
+
+    Returns rows sorted by ``open_time`` ascending. Partitions that cannot be
+    read are skipped so a single corrupt file does not abort the whole check.
+    """
+    validate_interval(interval)
+    require_pyarrow()
+    resolver = paths or LiveUpdatePaths()
+    symbol_root = resolver.current_parquet_root(interval) / f"symbol={symbol.upper()}"
+    if not symbol_root.exists():
+        return []
+    rows: list[tuple[int, int]] = []
+    for path in sorted(symbol_root.rglob("*.parquet")):
+        try:
+            table = pq.ParquetFile(path).read(columns=["open_time", "close_time"])
+        except (OSError, pa.ArrowInvalid):  # pragma: no cover - defensive
+            continue
+        for ot, ct in zip(
+            table.column("open_time").to_pylist(),
+            table.column("close_time").to_pylist(),
+        ):
+            rows.append((int(ot), int(ct)))
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+def check_continuity_for_symbol(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> ContinuityCheckResult:
+    """Check current-dataset continuity for one symbol + interval.
+
+    Verifies open_time interval alignment, duplicate open_time, missing
+    open_time gaps, ``close_time == open_time + interval_ms - 1``, and reports
+    the lag between the latest stored open_time and the latest closed open_time
+    derived from the clock.
+    """
+    validate_interval(interval)
+    interval_ms = interval_milliseconds(interval)
+    rows = read_current_symbol_open_times(interval, symbol, paths)
+    latest_closed = calculate_latest_closed_open_time(
+        interval,
+        now_ms,
+        close_lag_ms=close_lag_ms,
+    )
+    normalized_symbol = symbol.upper()
+
+    if not rows:
+        return ContinuityCheckResult(
+            symbol=normalized_symbol,
+            interval=interval,
+            rows=0,
+            min_open_time=None,
+            max_open_time=None,
+            duplicate_count=0,
+            missing_count=0,
+            latest_closed_open_time=latest_closed,
+            lag_bars=None,
+            status="empty",
+        )
+
+    open_times = [ot for ot, _ in rows]
+    min_open = open_times[0]
+    max_open = open_times[-1]
+
+    duplicate_count = len(open_times) - len(set(open_times))
+
+    misaligned_count = sum(1 for ot in open_times if ot % interval_ms != 0)
+
+    close_time_mismatch_count = sum(
+        1 for ot, ct in rows if ct != ot + interval_ms - 1
+    )
+
+    missing_count = 0
+    unique_sorted = sorted(set(open_times))
+    for prev, curr in zip(unique_sorted, unique_sorted[1:]):
+        step = (curr - prev) // interval_ms
+        if step > 1:
+            missing_count += step - 1
+
+    lag_bars = max(0, (latest_closed - max_open) // interval_ms)
+
+    has_gap = (
+        duplicate_count > 0
+        or missing_count > 0
+        or misaligned_count > 0
+        or close_time_mismatch_count > 0
+    )
+    status = "gap_detected" if has_gap else "ok"
+
+    return ContinuityCheckResult(
+        symbol=normalized_symbol,
+        interval=interval,
+        rows=len(rows),
+        min_open_time=min_open,
+        max_open_time=max_open,
+        duplicate_count=duplicate_count,
+        missing_count=missing_count,
+        latest_closed_open_time=latest_closed,
+        lag_bars=lag_bars,
+        status=status,
+        misaligned_count=misaligned_count,
+        close_time_mismatch_count=close_time_mismatch_count,
+    )
+
+
+def discover_current_dataset_symbols(
+    interval: str,
+    paths: LiveUpdatePaths | None = None,
+) -> list[str]:
+    """Return symbols present in the current dataset for one interval.
+
+    Used by ``--check-continuity`` when no ``--symbols`` are provided so the
+    acceptance check stays network-free and clone-safe.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    symbol_root = resolver.current_parquet_root(interval)
+    if not symbol_root.exists():
+        return []
+    symbols: list[str] = []
+    for entry in sorted(symbol_root.iterdir()):
+        if not entry.is_dir() or not entry.name.startswith("symbol="):
+            continue
+        symbol = entry.name[len("symbol="):].upper()
+        if symbol:
+            symbols.append(symbol)
+    return symbols
+
+
+def run_continuity_check(
+    intervals: tuple[str, ...],
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+    *,
+    now_ms: int,
+    close_lag_ms: int = 2000,
+) -> dict[str, list[ContinuityCheckResult]]:
+    """Run continuity checks for every interval + symbol pair.
+
+    Returns a mapping ``interval -> [ContinuityCheckResult, ...]`` ordered by
+    the requested intervals and sorted symbols.
+    """
+    resolver = paths or LiveUpdatePaths()
+    results: dict[str, list[ContinuityCheckResult]] = {}
+    for interval in intervals:
+        interval_symbols = list(symbols)
+        if not interval_symbols:
+            interval_symbols = discover_current_dataset_symbols(interval, resolver)
+        interval_symbols = sorted(set(s.upper() for s in interval_symbols))
+        results[interval] = [
+            check_continuity_for_symbol(
+                interval,
+                symbol,
+                resolver,
+                now_ms=now_ms,
+                close_lag_ms=close_lag_ms,
+            )
+            for symbol in interval_symbols
+        ]
+    return results
+
+
+def continuity_summary_payload(
+    results: dict[str, list[ContinuityCheckResult]],
+    *,
+    requested_interval: str,
+    active_intervals: tuple[str, ...],
+    symbols: list[str],
+    now_ms: int,
+) -> dict[str, Any]:
+    """Build the ``--check-continuity`` summary payload."""
+    flat = [item for items in results.values() for item in items]
+    statuses = {item.status for item in flat}
+    if not flat or all(item.status == "empty" for item in flat):
+        overall = "empty"
+    elif "gap_detected" in statuses:
+        overall = "gap_detected"
+    else:
+        overall = "ok"
+    # Symbols reflect what was actually checked: explicit symbols plus any
+    # discovered from the current dataset (so a network-free --check-continuity
+    # still reports the symbols it inspected).
+    reported_symbols = set(s.upper() for s in symbols)
+    reported_symbols.update(item.symbol for item in flat)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "dataset_version": DATASET_VERSION,
+        "requested_interval": requested_interval,
+        "active_intervals": list(active_intervals),
+        "symbols": sorted(reported_symbols),
+        "now_ms": int(now_ms),
+        "overall_status": overall,
+        "interval_results": {
+            interval: [item.to_dict() for item in items]
+            for interval, items in results.items()
+        },
+    }
+
+
 def webhook_health_payload(config: WebhookServerConfig) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -2781,7 +3032,7 @@ def resolve_symbols(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1-7 live-update layout, state, REST, WebSocket, webhook tools, and CLI skeleton.",
+        description="Phase 1-8 live-update layout, state, REST, WebSocket, webhook tools, CLI modes, and continuity checks.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
@@ -2899,7 +3150,21 @@ def run_once_mode(
     print("7. [skeleton] forced flush all partition queues")
     print("8. [skeleton] flush successful, update state")
     if args.check_continuity:
-        print("9. [skeleton] run continuity check")
+        results = run_continuity_check(
+            intervals,
+            symbols,
+            paths,
+            now_ms=now_ms,
+            close_lag_ms=args.close_lag_ms,
+        )
+        payload_cc = continuity_summary_payload(
+            results,
+            requested_interval=args.interval,
+            active_intervals=intervals,
+            symbols=symbols,
+            now_ms=now_ms,
+        )
+        print(pretty_json({"continuity_check": payload_cc}), end="")
     print("10. program exit")
     return 0
 
@@ -3008,6 +3273,45 @@ def run(args: argparse.Namespace) -> int:
             "results": [result.to_dict() for result in results],
         }
         print(pretty_json(payload), end="")
+        return 0
+
+    if args.check_continuity and not args.once:
+        # Continuity check is network-free: use --symbols / --symbols-file if
+        # provided, otherwise discover symbols from the current dataset so the
+        # acceptance check stays clone-safe. When combined with --once, the
+        # once flow runs the continuity check at its final step instead.
+        continuity_symbols: list[str] = []
+        if args.symbols:
+            continuity_symbols = [
+                chunk.strip().upper()
+                for chunk in args.symbols.replace(",", " ").split()
+                if chunk.strip()
+            ]
+        elif args.symbols_file:
+            sf_path = Path(args.symbols_file)
+            if sf_path.is_file():
+                for line in sf_path.read_text("utf-8").splitlines():
+                    line = line.strip().upper()
+                    if line and not line.startswith("#"):
+                        continuity_symbols.append(line)
+        now_ms_cc = args.now_ms
+        if now_ms_cc is None:
+            now_ms_cc = int(datetime.now(timezone.utc).timestamp() * 1000)
+        results = run_continuity_check(
+            intervals,
+            continuity_symbols,
+            paths,
+            now_ms=now_ms_cc,
+            close_lag_ms=args.close_lag_ms,
+        )
+        payload_cc = continuity_summary_payload(
+            results,
+            requested_interval=args.interval,
+            active_intervals=intervals,
+            symbols=continuity_symbols,
+            now_ms=now_ms_cc,
+        )
+        print(pretty_json(payload_cc), end="")
         return 0
 
     # All other commands require symbol resolution

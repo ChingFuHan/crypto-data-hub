@@ -1,6 +1,7 @@
 """Phase 1 tests for Binance UM Kline live-update primitives."""
 
 from pathlib import Path
+from contextlib import redirect_stderr
 import io
 import json
 import subprocess
@@ -10,6 +11,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 
 from datahub import live_update as lu
 
@@ -569,25 +571,25 @@ class StartupBackfillCalculationTests(unittest.TestCase):
 
 class ScriptPhase3Tests(unittest.TestCase):
     def test_script_plan_startup_backfill_requires_symbols(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                "scripts/live_update.py",
-                "--interval",
-                "1m",
-                "--plan-startup-backfill",
-                "--now-ms",
-                "1638747785000",
-            ],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        self.assertIn(result.returncode, (0, 2)) # May succeed if network is up, or fail with return code 2
-        if result.returncode == 2:
-            self.assertTrue("--symbols" in result.stderr or "failed to fetch exchangeInfo" in result.stderr)
+        # Network-free: without --symbols the runner falls back to exchangeInfo.
+        # Mock urlopen to raise URLError so resolve_symbols fails gracefully
+        # (no real Binance call, no socket) and main() exits with code 2.
+        err = io.StringIO()
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.URLError("test: no network")
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    lu.main(
+                        [
+                            "--interval",
+                            "1m",
+                            "--plan-startup-backfill",
+                            "--now-ms",
+                            "1638747785000",
+                        ]
+                    )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("failed to fetch exchangeInfo", err.getvalue())
 
     def test_script_plan_startup_backfill_outputs_plan_without_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -883,25 +885,25 @@ class RestBackfillFlowTests(unittest.TestCase):
 
 class ScriptPhase4Tests(unittest.TestCase):
     def test_script_run_startup_backfill_once_requires_symbols(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                "scripts/live_update.py",
-                "--interval",
-                "1m",
-                "--run-startup-backfill-once",
-                "--now-ms",
-                "1638747785000",
-            ],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-        self.assertIn(result.returncode, (0, 2)) # May succeed if network is up, or fail with return code 2
-        if result.returncode == 2:
-            self.assertTrue("--symbols" in result.stderr or "failed to fetch exchangeInfo" in result.stderr)
+        # Network-free: without --symbols the runner falls back to exchangeInfo.
+        # Mock urlopen to raise URLError so resolve_symbols fails gracefully
+        # (no real Binance call, no socket) and main() exits with code 2.
+        err = io.StringIO()
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.URLError("test: no network")
+            with redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    lu.main(
+                        [
+                            "--interval",
+                            "1m",
+                            "--run-startup-backfill-once",
+                            "--now-ms",
+                            "1638747785000",
+                        ]
+                    )
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("failed to fetch exchangeInfo", err.getvalue())
 
 class WebSocketPlanningTests(unittest.TestCase):
     def test_stream_names_expand_symbols_and_intervals(self):
