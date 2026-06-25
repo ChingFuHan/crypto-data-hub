@@ -4,9 +4,15 @@ from pathlib import Path
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from datahub import live_update as lu
+
+try:
+    import pyarrow.parquet as pq
+except ImportError:  # pragma: no cover
+    pq = None
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +147,172 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(payload["active_intervals"], list(lu.SUPPORTED_INTERVALS))
         self.assertTrue(payload["intervals_are_api_safe"])
         self.assertNotIn("all", payload["active_intervals"])
+
+
+def make_record(open_time, *, close=1.5, source="live_websocket:kline"):
+    return lu.KlineRecord.build(
+        symbol="BTCUSDT",
+        interval="1m",
+        open_time=open_time,
+        open=1.0,
+        high=max(2.0, close),
+        low=0.5,
+        close=close,
+        volume=10.0,
+        close_time=open_time + lu.interval_milliseconds("1m") - 1,
+        quote_volume=15.0,
+        trade_count=3,
+        taker_buy_base_volume=5.0,
+        taker_buy_quote_volume=7.5,
+        source_archive=source,
+        archive_source=source.split(":", 1)[0],
+        archive_period="2021-12-06",
+    )
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 2 parquet tests")
+class CurrentDatasetInitializationTests(unittest.TestCase):
+    def test_initialize_current_dataset_copies_seed_and_writes_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = lu.LiveUpdatePaths(repo_root=repo)
+            seed_file = (
+                paths.seed_parquet_root("1m")
+                / "symbol=BTCUSDT"
+                / "year=2021"
+                / "month=12"
+                / "part-000.parquet"
+            )
+            seed_file.parent.mkdir(parents=True, exist_ok=True)
+            table = lu._table_from_physical_rows([make_record(1638747600000).physical_dict()])
+            pq.write_table(table, seed_file)
+
+            result = lu.ensure_current_dataset(
+                "1m",
+                paths,
+                initialized_at_utc="2026-06-26T00:00:00Z",
+            )
+
+            self.assertEqual(result.status, "initialized")
+            copied = (
+                paths.current_parquet_root("1m")
+                / "symbol=BTCUSDT"
+                / "year=2021"
+                / "month=12"
+                / "part-000.parquet"
+            )
+            self.assertTrue(copied.exists())
+            marker = json.loads(
+                paths.current_initialized_marker("1m").read_text(encoding="utf-8")
+            )
+            self.assertEqual(marker["interval"], "1m")
+            self.assertEqual(marker["method"], "copy")
+            self.assertEqual(marker["schema_version"], 1)
+            self.assertEqual(marker["dataset_version"], "current-v1")
+
+            second = lu.ensure_current_dataset("1m", paths)
+            self.assertEqual(second.status, "already_initialized")
+
+    def test_initialize_current_dataset_reports_bootstrap_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            result = lu.ensure_current_dataset("3m", paths)
+
+            self.assertEqual(result.status, "bootstrap_required")
+            self.assertFalse(paths.current_parquet_root("3m").exists())
+
+    def test_initialize_current_dataset_allows_empty_existing_current_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            paths = lu.LiveUpdatePaths(repo_root=repo)
+            seed_file = (
+                paths.seed_parquet_root("1m")
+                / "symbol=BTCUSDT"
+                / "year=2021"
+                / "month=12"
+                / "part-000.parquet"
+            )
+            seed_file.parent.mkdir(parents=True, exist_ok=True)
+            table = lu._table_from_physical_rows([make_record(1638747600000).physical_dict()])
+            pq.write_table(table, seed_file)
+            paths.current_parquet_root("1m").mkdir(parents=True)
+
+            result = lu.ensure_current_dataset("1m", paths)
+
+            self.assertEqual(result.status, "initialized")
+            self.assertTrue(paths.current_initialized_marker("1m").exists())
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 2 parquet tests")
+class CurrentDatasetMergeTests(unittest.TestCase):
+    def test_merge_records_writes_sorted_partition(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            later = make_record(1638747660000, close=2.5)
+            earlier = make_record(1638747600000, close=1.5)
+
+            result = lu.merge_records_to_current_partition([later, earlier], paths)
+
+            self.assertEqual(result.input_row_count, 2)
+            self.assertEqual(result.existing_row_count, 0)
+            self.assertEqual(result.output_row_count, 2)
+            rows = pq.ParquetFile(result.target_path).read().to_pylist()
+            self.assertEqual([row["open_time"] for row in rows], [1638747600000, 1638747660000])
+            self.assertEqual(rows[0]["dataset_version"], "current-v1")
+
+    def test_merge_records_deduplicates_with_last_received_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            original = make_record(1638747600000, close=1.5, source="live_rest:/fapi/v1/klines")
+            first = lu.merge_records_to_current_partition([original], paths)
+
+            replacement = make_record(1638747600000, close=9.5, source="live_websocket:kline")
+            new_bar = make_record(1638747660000, close=2.5)
+            second = lu.merge_records_to_current_partition([replacement, new_bar], paths)
+
+            self.assertEqual(first.output_row_count, 1)
+            self.assertEqual(second.existing_row_count, 1)
+            self.assertEqual(second.duplicate_replaced_count, 1)
+            self.assertEqual(second.output_row_count, 2)
+            rows = pq.ParquetFile(second.target_path).read().to_pylist()
+            self.assertEqual([row["open_time"] for row in rows], [1638747600000, 1638747660000])
+            self.assertEqual(rows[0]["close"], 9.5)
+            self.assertEqual(rows[0]["archive_source"], "live_websocket")
+
+    def test_merge_rejects_cross_partition_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = lu.LiveUpdatePaths(repo_root=Path(tmp))
+            june = make_record(1782432000000)
+            july = make_record(1785110400000)
+
+            with self.assertRaises(lu.LiveUpdateCommandError):
+                lu.merge_records_to_current_partition([june, july], paths)
+
+
+@unittest.skipIf(pq is None, "pyarrow is required for Phase 2 parquet tests")
+class ScriptPhase2Tests(unittest.TestCase):
+    def test_script_initialize_current_dataset_reports_bootstrap_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/live_update.py",
+                    "--repo-root",
+                    tmp,
+                    "--interval",
+                    "1m",
+                    "--initialize-current-dataset",
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["active_intervals"], ["1m"])
+            self.assertEqual(payload["results"][0]["status"], "bootstrap_required")
 
 
 if __name__ == "__main__":

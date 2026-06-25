@@ -1,20 +1,33 @@
-"""Phase 1 primitives for Binance UM Kline live update.
+"""Phase 1-2 primitives for Binance UM Kline live update.
 
-This module intentionally stops at the Phase 1 boundary from ``LIVE_UPDATE.md``:
+This module intentionally stops at the Phase 2 boundary from ``LIVE_UPDATE.md``:
 data structures, normalized ``KlineRecord`` values, supported interval helpers,
-and deterministic path construction/parsing. Runtime behavior such as current
-dataset initialization, REST fallback, WebSocket handling, webhook serving, and
-Parquet merging belongs to later phases.
+deterministic path construction/parsing, current dataset initialization, and
+atomic per-partition Parquet merge. Runtime behavior such as state management,
+REST fallback, WebSocket handling, webhook serving, and long-running orchestration
+belongs to later phases.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any
+
+try:  # pragma: no cover - exercised through require_pyarrow
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError as exc:  # pragma: no cover
+    pa = None
+    pq = None
+    _PYARROW_IMPORT_ERROR = exc
+else:
+    _PYARROW_IMPORT_ERROR = None
 
 
 DATASET_ID = "market.binance.um.klines.live_update"
@@ -41,9 +54,65 @@ DEFAULT_LIVE_ROOT = Path("local_data/live_update") / LIVE_RUNTIME_DATASET
 TAIPEI_OFFSET = timedelta(hours=8)
 EPOCH = datetime(1970, 1, 1)
 
+CURRENT_PHYSICAL_COLUMNS: tuple[str, ...] = (
+    "interval",
+    "open_time",
+    "open_time_utc",
+    "open_time_taipei",
+    "date",
+    "month",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
+    "trade_count",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+    "source_archive",
+    "archive_source",
+    "archive_period",
+    "schema_version",
+    "dataset_version",
+)
+
 
 class LiveUpdateCommandError(ValueError):
     """Raised for invalid live-update CLI/path/interval input."""
+
+
+class LiveUpdateDependencyError(RuntimeError):
+    """Raised when an optional runtime dependency is missing."""
+
+
+def require_pyarrow() -> None:
+    if pa is None:
+        raise LiveUpdateDependencyError(
+            "pyarrow is required for parquet writing. Install it with: "
+            ".venv/bin/python -m pip install pyarrow"
+        ) from _PYARROW_IMPORT_ERROR
+
+
+def utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def pretty_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(pretty_json(payload), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def validate_interval(interval: str) -> str:
@@ -108,6 +177,13 @@ class RecordKey:
 
     def as_tuple(self) -> tuple[str, str, int]:
         return (self.symbol, self.interval, self.open_time)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "open_time": self.open_time,
+        }
 
 
 @dataclass(frozen=True)
@@ -349,10 +425,280 @@ def parse_date_segment(segment: str) -> str:
     return value
 
 
+@dataclass(frozen=True)
+class CurrentDatasetInitResult:
+    """Result of ensuring one interval's current dataset exists."""
+
+    interval: str
+    status: str  # "initialized" | "already_initialized" | "bootstrap_required"
+    seed_root: Path
+    current_root: Path
+    marker_path: Path
+    message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "interval": self.interval,
+            "status": self.status,
+            "seed_root": str(self.seed_root),
+            "current_root": str(self.current_root),
+            "marker_path": str(self.marker_path),
+        }
+        if self.message:
+            payload["message"] = self.message
+        return payload
+
+
+@dataclass(frozen=True)
+class ParquetMergeResult:
+    """Metadata returned after an atomic current-dataset partition merge."""
+
+    partition_key: PartitionKey
+    target_path: Path
+    input_row_count: int
+    existing_row_count: int
+    output_row_count: int
+    duplicate_replaced_count: int
+    min_open_time: int | None
+    max_open_time: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "partition_key": {
+                "interval": self.partition_key.interval,
+                "symbol": self.partition_key.symbol,
+                "year": self.partition_key.year,
+                "month": self.partition_key.month,
+            },
+            "target_path": str(self.target_path),
+            "input_row_count": self.input_row_count,
+            "existing_row_count": self.existing_row_count,
+            "output_row_count": self.output_row_count,
+            "duplicate_replaced_count": self.duplicate_replaced_count,
+            "min_open_time": self.min_open_time,
+            "max_open_time": self.max_open_time,
+        }
+
+
+def current_dataset_has_parquet(current_root: Path) -> bool:
+    return current_root.exists() and any(current_root.rglob("*.parquet"))
+
+
+def ensure_current_dataset(
+    interval: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    initialized_at_utc: str | None = None,
+) -> CurrentDatasetInitResult:
+    """Initialize current historical dataset for one interval if needed.
+
+    Existing current parquet is never overwritten. Missing seed parquet is
+    reported as ``bootstrap_required`` so callers can continue other intervals.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    seed_root = resolver.seed_parquet_root(interval)
+    current_root = resolver.current_parquet_root(interval)
+    marker = resolver.current_initialized_marker(interval)
+
+    if marker.exists() and current_dataset_has_parquet(current_root):
+        return CurrentDatasetInitResult(
+            interval=interval,
+            status="already_initialized",
+            seed_root=seed_root,
+            current_root=current_root,
+            marker_path=marker,
+        )
+    if current_dataset_has_parquet(current_root):
+        return CurrentDatasetInitResult(
+            interval=interval,
+            status="already_initialized",
+            seed_root=seed_root,
+            current_root=current_root,
+            marker_path=marker,
+            message="current parquet exists; leaving it untouched",
+        )
+    if not seed_root.exists() or not current_dataset_has_parquet(seed_root):
+        return CurrentDatasetInitResult(
+            interval=interval,
+            status="bootstrap_required",
+            seed_root=seed_root,
+            current_root=current_root,
+            marker_path=marker,
+            message="historical seed parquet is missing",
+        )
+
+    current_root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(seed_root, current_root, dirs_exist_ok=current_root.exists())
+    marker_payload = {
+        "initialized_at_utc": initialized_at_utc or utc_now(),
+        "seed_root": str(seed_root),
+        "current_root": str(current_root),
+        "interval": interval,
+        "method": "copy",
+        "schema_version": SCHEMA_VERSION,
+        "dataset_version": DATASET_VERSION,
+    }
+    write_json_atomic(marker, marker_payload)
+    return CurrentDatasetInitResult(
+        interval=interval,
+        status="initialized",
+        seed_root=seed_root,
+        current_root=current_root,
+        marker_path=marker,
+    )
+
+
+def ensure_current_datasets(
+    intervals: tuple[str, ...],
+    paths: LiveUpdatePaths | None = None,
+) -> list[CurrentDatasetInitResult]:
+    """Initialize each requested interval independently."""
+    resolver = paths or LiveUpdatePaths()
+    return [ensure_current_dataset(interval, resolver) for interval in intervals]
+
+
+def _current_parquet_schema():
+    require_pyarrow()
+    return pa.schema(
+        [
+            ("interval", pa.string()),
+            ("open_time", pa.int64()),
+            ("open_time_utc", pa.string()),
+            ("open_time_taipei", pa.string()),
+            ("date", pa.string()),
+            ("month", pa.int32()),
+            ("open", pa.float64()),
+            ("high", pa.float64()),
+            ("low", pa.float64()),
+            ("close", pa.float64()),
+            ("volume", pa.float64()),
+            ("close_time", pa.int64()),
+            ("quote_volume", pa.float64()),
+            ("trade_count", pa.int64()),
+            ("taker_buy_base_volume", pa.float64()),
+            ("taker_buy_quote_volume", pa.float64()),
+            ("source_archive", pa.string()),
+            ("archive_source", pa.string()),
+            ("archive_period", pa.string()),
+            ("schema_version", pa.int32()),
+            ("dataset_version", pa.string()),
+        ]
+    )
+
+
+def _normalize_timestamp_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _normalize_physical_row(
+    row: dict[str, Any],
+    key: PartitionKey,
+) -> dict[str, Any]:
+    """Coerce existing physical parquet rows to the current Phase 2 schema."""
+    return {
+        "interval": str(row.get("interval", key.interval)),
+        "open_time": int(row["open_time"]),
+        "open_time_utc": _normalize_timestamp_value(row["open_time_utc"]),
+        "open_time_taipei": _normalize_timestamp_value(row["open_time_taipei"]),
+        "date": str(row["date"]),
+        "month": int(row.get("month", key.month)),
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": float(row["volume"]),
+        "close_time": int(row["close_time"]),
+        "quote_volume": float(row["quote_volume"]),
+        "trade_count": int(row["trade_count"]),
+        "taker_buy_base_volume": float(row["taker_buy_base_volume"]),
+        "taker_buy_quote_volume": float(row["taker_buy_quote_volume"]),
+        "source_archive": str(row["source_archive"]),
+        "archive_source": str(row["archive_source"]),
+        "archive_period": str(row["archive_period"]),
+        "schema_version": int(row.get("schema_version") or SCHEMA_VERSION),
+        "dataset_version": str(row.get("dataset_version") or DATASET_VERSION),
+    }
+
+
+def _table_from_physical_rows(rows: list[dict[str, Any]]):
+    schema = _current_parquet_schema()
+    columns = {
+        name: [row[name] for row in rows]
+        for name in CURRENT_PHYSICAL_COLUMNS
+    }
+    return pa.table(columns, schema=schema)
+
+
+def read_current_partition_rows(path: Path, key: PartitionKey) -> list[dict[str, Any]]:
+    require_pyarrow()
+    if not path.exists():
+        return []
+    table = pq.ParquetFile(path).read()
+    return [_normalize_physical_row(row, key) for row in table.to_pylist()]
+
+
+def merge_records_to_current_partition(
+    records: list[KlineRecord],
+    paths: LiveUpdatePaths | None = None,
+) -> ParquetMergeResult:
+    """Atomically merge closed Kline records into their current parquet partition.
+
+    All records must share one partition key. The caller owns queueing and state
+    updates in later phases; this function only performs the partition merge and
+    reports the target path that can be used after a successful flush.
+    """
+    if not records:
+        raise LiveUpdateCommandError("cannot merge an empty record batch")
+    key = records[0].partition_key()
+    for rec in records:
+        if rec.partition_key() != key:
+            raise LiveUpdateCommandError(
+                "all records in one parquet merge must share a partition key"
+            )
+
+    resolver = paths or LiveUpdatePaths()
+    target = resolver.current_partition_file(key)
+    existing_rows = read_current_partition_rows(target, key)
+    by_key: dict[tuple[str, str, int], dict[str, Any]] = {}
+    duplicate_replaced = 0
+
+    for row in existing_rows:
+        row_key = (key.symbol.upper(), str(row["interval"]), int(row["open_time"]))
+        by_key[row_key] = row
+
+    for rec in records:
+        rec_key = rec.record_key().as_tuple()
+        if rec_key in by_key:
+            duplicate_replaced += 1
+        by_key[rec_key] = rec.physical_dict()
+
+    merged_rows = [by_key[k] for k in sorted(by_key, key=lambda item: item[2])]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    table = _table_from_physical_rows(merged_rows)
+    tmp = target.with_name(target.name + ".tmp")
+    pq.write_table(table, tmp)
+    os.replace(tmp, target)
+
+    open_times = [int(row["open_time"]) for row in merged_rows]
+    return ParquetMergeResult(
+        partition_key=key,
+        target_path=target,
+        input_row_count=len(records),
+        existing_row_count=len(existing_rows),
+        output_row_count=len(merged_rows),
+        duplicate_replaced_count=duplicate_replaced,
+        min_open_time=min(open_times) if open_times else None,
+        max_open_time=max(open_times) if open_times else None,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python scripts/live_update.py",
-        description="Phase 1 live-update layout and record primitives.",
+        description="Phase 1-2 live-update layout and current dataset tools.",
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
@@ -362,6 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--describe-layout",
         action="store_true",
         help="print Phase 1 path layout JSON and exit",
+    )
+    parser.add_argument(
+        "--initialize-current-dataset",
+        action="store_true",
+        help="initialize current historical dataset for the requested interval(s) and exit",
     )
     return parser
 
@@ -386,10 +737,21 @@ def run(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    if args.initialize_current_dataset:
+        results = ensure_current_datasets(intervals, paths)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "results": [result.to_dict() for result in results],
+        }
+        print(pretty_json(payload), end="")
+        return 0
     print(
-        "Phase 1 scaffold ready: "
+        "Phase 2 scaffold ready: "
         f"active_intervals={','.join(intervals)}; "
-        "runtime phases are not implemented yet."
+        "state/backfill/runtime phases are not implemented yet."
     )
     return 0
 
