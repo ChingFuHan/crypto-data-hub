@@ -1323,6 +1323,152 @@ def plan_current_layout_migration(
     }
 
 
+# Per-symbol migration precheck statuses.
+CURRENT_LAYOUT_MIGRATION_NONE = "no_migration_needed"
+CURRENT_LAYOUT_MIGRATION_YEAR_ONLY = "year_only_needs_migration"
+CURRENT_LAYOUT_MIGRATION_MIXED = "mixed_layout_needs_migration"
+
+_MIGRATION_ACTIONS = {
+    CURRENT_LAYOUT_MIGRATION_NONE: "already canonical year/month; no migration needed",
+    CURRENT_LAYOUT_MIGRATION_YEAR_ONLY: (
+        "convert year-only rows into canonical year/month partitions"
+    ),
+    CURRENT_LAYOUT_MIGRATION_MIXED: (
+        "merge year-only + year/month rows by open_time, deduplicate by open_time, "
+        "write canonical year/month partitions, verify row count and continuity "
+        "before replacing symbol dir"
+    ),
+}
+
+
+def _read_open_times(path: Path) -> list[int]:
+    """Read just the ``open_time`` column of one parquet file (metadata-light)."""
+    require_pyarrow()
+    try:
+        table = pq.ParquetFile(path).read(columns=["open_time"])
+    except (OSError, pa.ArrowInvalid):  # pragma: no cover - defensive
+        return []
+    return [int(value) for value in table.column("open_time").to_pylist()]
+
+
+def precheck_symbol_layout_migration(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+) -> dict[str, Any]:
+    """Read-only migration precheck for one symbol's current dataset layout.
+
+    Derives the expected canonical ``year``/``month`` partitions from each row's
+    ``open_time`` (NOT from the on-disk year-only path), and reports row count,
+    open_time range, duplicate count, and the recommended migration action. It
+    only reads parquet; it never moves, deletes, overwrites, or rewrites data.
+    """
+    validate_interval(interval)
+    require_pyarrow()
+    resolver = paths or LiveUpdatePaths()
+    normalized = symbol.upper()
+    symbol_root = resolver.current_parquet_root(interval) / f"symbol={normalized}"
+
+    year_only_files: list[str] = []
+    year_month_files: list[str] = []
+    open_times: list[int] = []
+    if symbol_root.exists():
+        for path, has_month in _symbol_partition_files(symbol_root):
+            open_times.extend(_read_open_times(path))
+            if has_month:
+                year_month_files.append(str(path))
+            else:
+                year_only_files.append(str(path))
+
+    year_only_count = len(year_only_files)
+    year_month_count = len(year_month_files)
+    row_count = len(open_times)
+    unique_open_times = sorted(set(open_times))
+    duplicate_count = row_count - len(unique_open_times)
+
+    partitions: dict[tuple[int, int], None] = {}
+    for open_time in unique_open_times:
+        fields = datetime_fields(open_time)
+        partitions[(fields["year"], fields["month"])] = None
+    expected_partitions = [
+        {"year": year, "month": month, "partition": f"year={year}/month={month:02d}"}
+        for year, month in sorted(partitions)
+    ]
+
+    if year_only_count > 0 and year_month_count > 0:
+        status = CURRENT_LAYOUT_MIGRATION_MIXED
+    elif year_only_count > 0:
+        status = CURRENT_LAYOUT_MIGRATION_YEAR_ONLY
+    else:
+        status = CURRENT_LAYOUT_MIGRATION_NONE
+
+    return {
+        "symbol": normalized,
+        "interval": interval,
+        "status": status,
+        "year_only_file_count": year_only_count,
+        "year_month_file_count": year_month_count,
+        "year_only_files": year_only_files,
+        "year_month_files": year_month_files,
+        "expected_canonical_partition_count": len(expected_partitions),
+        "expected_canonical_partitions": expected_partitions,
+        "row_count": row_count,
+        "min_open_time": unique_open_times[0] if unique_open_times else None,
+        "max_open_time": unique_open_times[-1] if unique_open_times else None,
+        "duplicate_open_time_count": duplicate_count,
+        "recommended_action": _MIGRATION_ACTIONS[status],
+    }
+
+
+def build_current_layout_migration_precheck(
+    interval: str,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+) -> dict[str, Any]:
+    """Read-only migration precheck for an interval across the given symbols.
+
+    When ``symbols`` is empty, scans the LOCAL current dataset for symbols -- it
+    never contacts Binance / exchangeInfo. The result is machine-readable and the
+    function writes nothing.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    target_symbols = [s.strip().upper() for s in symbols if s.strip()]
+    if not target_symbols:
+        target_symbols = discover_current_dataset_symbols(interval, resolver)
+    target_symbols = sorted(set(target_symbols))
+
+    prechecks = [
+        precheck_symbol_layout_migration(interval, symbol, resolver)
+        for symbol in target_symbols
+    ]
+    statuses = {item["status"] for item in prechecks}
+    if CURRENT_LAYOUT_MIGRATION_MIXED in statuses:
+        overall = CURRENT_LAYOUT_MIGRATION_MIXED
+    elif CURRENT_LAYOUT_MIGRATION_YEAR_ONLY in statuses:
+        overall = CURRENT_LAYOUT_MIGRATION_YEAR_ONLY
+    else:
+        overall = CURRENT_LAYOUT_MIGRATION_NONE
+
+    return {
+        "interval": interval,
+        "symbols": target_symbols,
+        "status": overall,
+        "year_only_file_count": sum(i["year_only_file_count"] for i in prechecks),
+        "year_month_file_count": sum(i["year_month_file_count"] for i in prechecks),
+        "symbols_needing_migration": [
+            item["symbol"]
+            for item in prechecks
+            if item["status"] != CURRENT_LAYOUT_MIGRATION_NONE
+        ],
+        "prechecks": prechecks,
+        "note": (
+            "dry-run precheck only; reads parquet, never moves/deletes/overwrites "
+            "data and never contacts Binance"
+        ),
+    }
+
+
 def _current_parquet_schema():
     require_pyarrow()
     return pa.schema(
@@ -3545,6 +3691,14 @@ def build_parser() -> argparse.ArgumentParser:
             "(year-only vs canonical year/month, mixed layout); writes nothing"
         ),
     )
+    parser.add_argument(
+        "--plan-current-layout-migration",
+        action="store_true",
+        help=(
+            "read-only dry-run migration precheck for the current dataset layout; "
+            "writes nothing and never contacts Binance"
+        ),
+    )
     return parser
 
 
@@ -3814,6 +3968,52 @@ def run(args: argparse.Namespace) -> int:
             "interval_results": interval_results,
         }
         print(pretty_json(payload_audit), end="")
+        return 0
+
+    if args.plan_current_layout_migration:
+        # Read-only dry-run precheck. Symbol resolution here is LOCAL current
+        # dataset discovery only -- ``all`` and an omitted --symbols both scan the
+        # local current dataset; this mode never calls Binance / exchangeInfo and
+        # never moves, deletes, overwrites, or rewrites any parquet.
+        plan_symbols = parse_symbols_arg(args.symbols)
+        if plan_symbols == [ALL_SYMBOLS_TOKEN]:
+            plan_symbols = []
+        if not plan_symbols and args.symbols_file:
+            sf_path = Path(args.symbols_file)
+            if sf_path.is_file():
+                plan_symbols = _read_symbols_file(args.symbols_file)
+        interval_results = {
+            interval: build_current_layout_migration_precheck(
+                interval, plan_symbols, paths
+            )
+            for interval in intervals
+        }
+        if any(
+            result["status"] == CURRENT_LAYOUT_MIGRATION_MIXED
+            for result in interval_results.values()
+        ):
+            overall = CURRENT_LAYOUT_MIGRATION_MIXED
+        elif any(
+            result["status"] == CURRENT_LAYOUT_MIGRATION_YEAR_ONLY
+            for result in interval_results.values()
+        ):
+            overall = CURRENT_LAYOUT_MIGRATION_YEAR_ONLY
+        else:
+            overall = CURRENT_LAYOUT_MIGRATION_NONE
+        payload_plan = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "canonical_layout": "symbol=<SYMBOL>/year=<YYYY>/month=<MM>/part-000.parquet",
+            "overall_status": overall,
+            "interval_results": interval_results,
+            "note": (
+                "dry-run precheck only; reads parquet, never migrates data and "
+                "never contacts Binance"
+            ),
+        }
+        print(pretty_json(payload_plan), end="")
         return 0
 
     # All other commands require symbol resolution

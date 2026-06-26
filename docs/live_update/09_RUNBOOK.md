@@ -488,11 +488,45 @@ mixed_symbols
 status        ok / mixed_layout_detected
 ```
 
+### Migration dry-run precheck
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols BTCUSDT ETHUSDT \
+  --plan-current-layout-migration
+```
+
+每 symbol precheck 輸出：
+
+```text
+status        no_migration_needed / year_only_needs_migration / mixed_layout_needs_migration
+year_only_file_count / year_month_file_count
+year_only_files / year_month_files
+expected_canonical_partition_count / expected_canonical_partitions   （依 open_time 推導）
+row_count / min_open_time / max_open_time / duplicate_open_time_count
+recommended_action
+```
+
+未提供 `--symbols`（或 `--symbols all`）時，掃描**本地 current dataset**
+（local discovery）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --plan-current-layout-migration
+```
+
 注意：
 
-- `--audit-current-layout` 只讀檔案，不寫 parquet / jsonl / state，不自動 migration。
-- 本次僅提供 audit 與 dry-run plan（`plan_current_layout_migration`）；既有 mixed
-  layout 舊資料需另行人工處理，不會自動搬移。
+- `--audit-current-layout` = layout audit；`--plan-current-layout-migration` =
+  dry-run migration precheck。兩者皆只讀檔案，不寫 parquet / jsonl / state，不移動
+  / 不刪除 / 不覆蓋資料，不自動 migration，**不打 Binance / exchangeInfo**。
+- 此模式的 `all` 是本地 current dataset discovery，不是交易所全市場。
+- mixed layout 實際 migration 須**另行執行**，並先驗證 row-count / duplicate /
+  continuity 才能替換 symbol dir。本次不提供真正 migration command。
+- precheck 讀 parquet `open_time` 欄位；1m 全市場（上千檔）可能較慢，建議先指定
+  symbols 小範圍跑。
 
 ---
 

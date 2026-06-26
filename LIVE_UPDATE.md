@@ -87,6 +87,15 @@ docs/live_update/09_RUNBOOK.md
   `--audit-current-layout`（read-only，輸出 JSON：`year_only_file_count` /
   `year_month_file_count` / `mixed_symbol_count` / `mixed_symbols` / `status`）
   檢查。本次只提供 audit / dry-run plan，**不**自動 migration 既有舊資料。
+- **Current layout migration dry-run precheck。** `--plan-current-layout-migration`
+  （read-only）對每個 symbol 輸出 precheck：`status`（`no_migration_needed` /
+  `year_only_needs_migration` / `mixed_layout_needs_migration`）、
+  `year_only_files` / `year_month_files`、`expected_canonical_partitions`（依
+  `open_time` 推導）、`row_count` / `min_open_time` / `max_open_time` /
+  `duplicate_open_time_count`、`recommended_action`。只讀 parquet，**不寫** /
+  **不**移動 / **不**刪除 / **不**覆蓋資料、**不**打 Binance。未提供 `--symbols`
+  （或 `--symbols all`）時掃描**本地 current dataset**，非交易所全市場。mixed
+  layout 實際 migration 須另行執行並做 row-count / duplicate / continuity 驗證。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是
   MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
   daemon。orchestration、retention manager、長時間全市場 all-interval 部署

@@ -265,6 +265,20 @@ auto-migration:
   --symbols BTCUSDT ETHUSDT --audit-current-layout
 ```
 
+For a per-symbol migration **dry-run precheck** (status, expected canonical
+year/month partitions, row/duplicate counts, recommended action) — also
+read-only, no writes, no Binance call, local current-dataset discovery when
+symbols are omitted:
+
+```bash
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols BTCUSDT ETHUSDT --plan-current-layout-migration
+```
+
+Neither command migrates data. Actual mixed-layout migration must be run
+separately and verified by row count / duplicates / continuity. (1m full-market
+precheck reads many parquet files and can be slow — scope it with `--symbols`.)
+
 What gets written (all git-ignored):
 
 - Current dataset: `local_data/binance_um_klines_current/interval=1m/parquet/`
