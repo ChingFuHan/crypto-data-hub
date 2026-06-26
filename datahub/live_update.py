@@ -995,6 +995,135 @@ def ensure_current_datasets(
     return [ensure_current_dataset(interval, resolver) for interval in intervals]
 
 
+# Status values for one explicitly requested symbol's current dataset.
+CURRENT_SYMBOL_ALREADY_AVAILABLE = "already_available"
+CURRENT_SYMBOL_INITIALIZED_FROM_SEED = "initialized_current_symbol_from_seed"
+CURRENT_SYMBOL_BOOTSTRAP_REQUIRED = "bootstrap_required"
+
+
+@dataclass(frozen=True)
+class CurrentSymbolInitResult:
+    """Result of ensuring one explicitly requested symbol exists in current.
+
+    Distinguishes a genuine historical-seed gap (``bootstrap_required``) from a
+    *partial current dataset symbol missing* situation -- the seed has the
+    symbol but the current dataset does not -- which is repaired by copying the
+    seed symbol into the current dataset.
+    """
+
+    interval: str
+    symbol: str
+    status: str
+    seed_symbol_root: Path
+    current_symbol_root: Path
+    message: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "interval": self.interval,
+            "symbol": self.symbol,
+            "status": self.status,
+            "seed_symbol_root": str(self.seed_symbol_root),
+            "current_symbol_root": str(self.current_symbol_root),
+        }
+        if self.message:
+            payload["message"] = self.message
+        return payload
+
+
+def _atomic_copy_symbol_dir(src: Path, dst: Path) -> None:
+    """Copy a seed symbol directory into the current dataset atomically.
+
+    Copies into a sibling temp directory first, then renames it onto the target
+    so a failed copy never leaves a half-written directory that later code could
+    mistake for a complete current symbol. Never overwrites an existing target
+    and never touches the source.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.parent / (dst.name + f".tmp-{os.getpid()}")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    try:
+        shutil.copytree(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+
+def ensure_current_symbol_from_seed(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    copied_at_utc: str | None = None,
+) -> CurrentSymbolInitResult:
+    """Ensure one explicitly requested symbol exists in the current dataset.
+
+    * current symbol already present -> ``already_available`` (never overwritten)
+    * current missing but seed present -> copy seed symbol into current and
+      report ``initialized_current_symbol_from_seed``
+    * seed symbol also missing -> ``bootstrap_required`` (do not synthesize a
+      full history from zero)
+
+    Only the named symbol is touched. The seed dataset is never modified.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    normalized = symbol.upper()
+    seed_symbol_root = resolver.seed_parquet_root(interval) / f"symbol={normalized}"
+    current_symbol_root = resolver.current_parquet_root(interval) / f"symbol={normalized}"
+
+    if current_symbol_root.exists():
+        return CurrentSymbolInitResult(
+            interval=interval,
+            symbol=normalized,
+            status=CURRENT_SYMBOL_ALREADY_AVAILABLE,
+            seed_symbol_root=seed_symbol_root,
+            current_symbol_root=current_symbol_root,
+        )
+    if not current_dataset_has_parquet(seed_symbol_root):
+        return CurrentSymbolInitResult(
+            interval=interval,
+            symbol=normalized,
+            status=CURRENT_SYMBOL_BOOTSTRAP_REQUIRED,
+            seed_symbol_root=seed_symbol_root,
+            current_symbol_root=current_symbol_root,
+            message="historical seed parquet is missing for this symbol",
+        )
+
+    _atomic_copy_symbol_dir(seed_symbol_root, current_symbol_root)
+    return CurrentSymbolInitResult(
+        interval=interval,
+        symbol=normalized,
+        status=CURRENT_SYMBOL_INITIALIZED_FROM_SEED,
+        seed_symbol_root=seed_symbol_root,
+        current_symbol_root=current_symbol_root,
+        message="copied seed symbol into current dataset",
+    )
+
+
+def ensure_current_symbols_from_seed(
+    interval: str,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+) -> list[CurrentSymbolInitResult]:
+    """Repair partial current dataset for each explicitly requested symbol.
+
+    Only the given symbols are considered -- this never copies a whole interval
+    or expands to the whole market.
+    """
+    resolver = paths or LiveUpdatePaths()
+    results: list[CurrentSymbolInitResult] = []
+    for symbol in symbols:
+        normalized = symbol.strip().upper()
+        if not normalized:
+            continue
+        results.append(ensure_current_symbol_from_seed(interval, normalized, resolver))
+    return results
+
+
 def _current_parquet_schema():
     require_pyarrow()
     return pa.schema(
@@ -1901,6 +2030,12 @@ def run_startup_backfill_once(
 ) -> list[RestBackfillResult]:
     """Run Phase 4 startup backfill once; no long-running runtime is started."""
     resolver = paths or LiveUpdatePaths()
+    # Repair partial current dataset for the explicitly requested symbols before
+    # planning: if the seed has a symbol the current dataset is missing, copy it
+    # in so gap planning resolves to a real max_open_time instead of falsely
+    # reporting bootstrap_required. Seed-missing symbols stay bootstrap_required.
+    for interval in intervals:
+        ensure_current_symbols_from_seed(interval, symbols, resolver)
     startup_plans = plan_startup_backfill(
         intervals,
         symbols,
@@ -3353,6 +3488,35 @@ def run(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     if args.initialize_current_dataset:
+        init_symbols = resolve_symbols(
+            args.symbols,
+            args.symbols_file,
+            args.max_symbols,
+            base_url=args.binance_rest_base_url,
+            timeout=args.http_timeout,
+        )
+        if init_symbols:
+            # Symbol-scoped initialization: only repair the explicitly requested
+            # symbols, never copy a whole interval implicitly.
+            symbol_results = {
+                interval: [
+                    result.to_dict()
+                    for result in ensure_current_symbols_from_seed(
+                        interval, init_symbols, paths
+                    )
+                ]
+                for interval in intervals
+            }
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "dataset_version": DATASET_VERSION,
+                "requested_interval": args.interval,
+                "active_intervals": list(intervals),
+                "symbols": init_symbols,
+                "symbol_results": symbol_results,
+            }
+            print(pretty_json(payload), end="")
+            return 0
         results = ensure_current_datasets(intervals, paths)
         payload = {
             "schema_version": SCHEMA_VERSION,

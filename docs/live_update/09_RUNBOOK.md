@@ -379,6 +379,60 @@ status = ok
 
 ---
 
+## 20b. Partial current symbol missing 修復
+
+情境：
+
+```text
+seed   local_data/binance_um_klines/interval=1m/parquet/symbol=ETHUSDT      存在
+current local_data/binance_um_klines_current/interval=1m/parquet/symbol=ETHUSDT 不存在
+```
+
+這是 partial current dataset symbol missing，不是 historical bootstrap missing。
+
+新機器流程：
+
+```text
+1. INIT.md 建 historical seed
+2. live update 初始化指定 current symbol
+3. 補最新 gap
+```
+
+只初始化指定 symbol 的 current dataset：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols ETHUSDT \
+  --initialize-current-dataset
+```
+
+狀態：
+
+```text
+initialized_current_symbol_from_seed  seed 在、current 缺 -> copy 修復
+already_available                     current 已存在 -> 不覆蓋、不重 copy
+bootstrap_required                    seed 也缺 -> 需先建歷史 seed
+```
+
+再補最新 gap（會先確保 current symbol 存在，再依 max_open_time 補到 latest）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols ETHUSDT \
+  --run-startup-backfill-once
+```
+
+注意：
+
+- 只處理明確指定的 symbols，不做整個 interval / 全市場隱式搬運。
+- copy 先寫 temp dir 再 rename；失敗不留半成品。不覆蓋既有 current symbol、不刪
+  資料、不改 seed、不寫 dataset_registry.json。
+- 不建議一開始就全市場初始化；先小範圍驗收再擴大。
+
+---
+
 ## 21. current dataset 重建
 
 未來可支援：

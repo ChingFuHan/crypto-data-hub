@@ -216,6 +216,32 @@ Whole-market smoke test (resolve all, keep the first 5):
 > widen. Data-writing modes refuse to run without `--symbols`; they never
 > default to the whole market.
 
+### New-machine / partial current symbol flow
+
+1. Build the historical seed with `INIT.md` (`local_data/binance_um_klines/...`).
+2. Initialize the current dataset for the symbols you want, e.g. one symbol:
+
+   ```bash
+   .venv/bin/python scripts/live_update.py \
+     --interval 1m --symbols ETHUSDT --initialize-current-dataset
+   ```
+
+3. Then catch up the latest gap:
+
+   ```bash
+   .venv/bin/python scripts/live_update.py \
+     --interval 1m --symbols ETHUSDT --run-startup-backfill-once
+   ```
+
+**Partial current symbol missing:** if the seed has a symbol but
+`local_data/binance_um_klines_current/.../symbol=ETHUSDT` is missing, that is a
+*partial current symbol missing*, **not** a historical bootstrap. Repair it with
+`--initialize-current-dataset --symbols ETHUSDT` — it copies only that symbol's
+seed parquet into current (temp dir then rename; never overwrites, never deletes,
+never touches the seed). Statuses: `initialized_current_symbol_from_seed`,
+`already_available`, or `bootstrap_required` (seed genuinely missing). Don't
+initialize the whole market up front — validate a small scope first.
+
 What gets written (all git-ignored):
 
 - Current dataset: `local_data/binance_um_klines_current/interval=1m/parquet/`

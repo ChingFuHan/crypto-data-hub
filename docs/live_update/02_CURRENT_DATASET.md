@@ -56,6 +56,43 @@ local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/
 
 若某個 interval 不存在，不應阻斷其他 interval。
 
+### 2.1 Partial current symbol missing（per-symbol 修復）
+
+interval 層級的 marker / parquet 存在，**不代表**每個 symbol 都存在。會出現：
+
+```text
+seed   symbol=ETHUSDT 存在
+current symbol=ETHUSDT 不存在
+```
+
+這是 **partial current dataset symbol missing**，不是 historical bootstrap
+missing。診斷必須區分：
+
+```text
+A. seed symbol 缺 + current symbol 缺      -> bootstrap_required
+B. seed symbol 在 + current symbol 缺      -> initialized_current_symbol_from_seed（copy 修復）
+C. current symbol 在                       -> already_available（不覆蓋、不重 copy）
+```
+
+修復方式（只處理明確指定的 symbols，不做整個 interval / 全市場隱式搬運）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols ETHUSDT \
+  --initialize-current-dataset
+```
+
+行為：
+
+- 只 copy 指定 symbol 的 seed parquet 到 current dataset。
+- 先 copy 到 temp dir，再 rename 到 target；失敗不留半成品（不會被誤認完整）。
+- 不覆蓋已存在的 current symbol，不刪資料，不改 seed，不寫 dataset_registry.json。
+
+`--run-startup-backfill-once` 在做 REST gap backfill 前，會先對指定 symbols
+做上述修復：seed 在但 current 缺時先 copy，再依 current max_open_time 補到
+latest closed KBar；seed 缺時仍回 bootstrap_required，不從 0 重建歷史。
+
 ---
 
 ## 3. 初始化 Marker

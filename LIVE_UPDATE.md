@@ -60,6 +60,15 @@ docs/live_update/09_RUNBOOK.md
   `--symbols` 會明確失敗，不會默默全市場。
   ⚠️ `--symbols all` 會增加 REST / WebSocket / IO 壓力，不建議一開始就搭配
   `--interval all` 全市場跑；新機器先小範圍驗收再擴大。
+- **Partial current symbol missing 修復。** interval marker / parquet 存在不代表
+  每個 symbol 都在。若 seed symbol 存在但 current symbol 缺失，這是 partial
+  current dataset symbol missing，**不是** historical bootstrap missing。可用
+  `--initialize-current-dataset --symbols ETHUSDT` 只修復指定 symbol（copy seed
+  parquet 到 current，temp dir 後 rename，不覆蓋既有、不刪資料、不改 seed）。
+  `--run-startup-backfill-once` 會在 REST backfill 前先做此修復，再補到 latest
+  closed KBar；seed 缺時仍回 bootstrap_required。狀態：
+  `bootstrap_required` / `initialized_current_symbol_from_seed` /
+  `already_available`。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是
   MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
   daemon。orchestration、retention manager、長時間全市場 all-interval 部署
