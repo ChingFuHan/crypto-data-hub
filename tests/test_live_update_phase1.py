@@ -571,25 +571,25 @@ class StartupBackfillCalculationTests(unittest.TestCase):
 
 class ScriptPhase3Tests(unittest.TestCase):
     def test_script_plan_startup_backfill_requires_symbols(self):
-        # Network-free: without --symbols the runner falls back to exchangeInfo.
-        # Mock urlopen to raise URLError so resolve_symbols fails gracefully
-        # (no real Binance call, no socket) and main() exits with code 2.
+        # Network-free: without --symbols the runner fails loudly instead of
+        # silently expanding to the whole market (no exchangeInfo call at all).
         err = io.StringIO()
-        with patch("urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.URLError("test: no network")
-            with redirect_stderr(err):
-                with self.assertRaises(SystemExit) as ctx:
-                    lu.main(
-                        [
-                            "--interval",
-                            "1m",
-                            "--plan-startup-backfill",
-                            "--now-ms",
-                            "1638747785000",
-                        ]
-                    )
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                lu.main(
+                    [
+                        "--interval",
+                        "1m",
+                        "--plan-startup-backfill",
+                        "--now-ms",
+                        "1638747785000",
+                    ]
+                )
         self.assertEqual(ctx.exception.code, 2)
-        self.assertIn("failed to fetch exchangeInfo", err.getvalue())
+        message = err.getvalue()
+        self.assertIn("--symbols", message)
+        self.assertIn("all", message)
+        self.assertIn("BTCUSDT", message)
 
     def test_script_plan_startup_backfill_outputs_plan_without_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -885,25 +885,25 @@ class RestBackfillFlowTests(unittest.TestCase):
 
 class ScriptPhase4Tests(unittest.TestCase):
     def test_script_run_startup_backfill_once_requires_symbols(self):
-        # Network-free: without --symbols the runner falls back to exchangeInfo.
-        # Mock urlopen to raise URLError so resolve_symbols fails gracefully
-        # (no real Binance call, no socket) and main() exits with code 2.
+        # Network-free: without --symbols the runner fails loudly instead of
+        # silently expanding to the whole market (no exchangeInfo call at all).
         err = io.StringIO()
-        with patch("urllib.request.urlopen") as mock_urlopen:
-            mock_urlopen.side_effect = urllib.error.URLError("test: no network")
-            with redirect_stderr(err):
-                with self.assertRaises(SystemExit) as ctx:
-                    lu.main(
-                        [
-                            "--interval",
-                            "1m",
-                            "--run-startup-backfill-once",
-                            "--now-ms",
-                            "1638747785000",
-                        ]
-                    )
+        with redirect_stderr(err):
+            with self.assertRaises(SystemExit) as ctx:
+                lu.main(
+                    [
+                        "--interval",
+                        "1m",
+                        "--run-startup-backfill-once",
+                        "--now-ms",
+                        "1638747785000",
+                    ]
+                )
         self.assertEqual(ctx.exception.code, 2)
-        self.assertIn("failed to fetch exchangeInfo", err.getvalue())
+        message = err.getvalue()
+        self.assertIn("--symbols", message)
+        self.assertIn("all", message)
+        self.assertIn("BTCUSDT", message)
 
 class WebSocketPlanningTests(unittest.TestCase):
     def test_stream_names_expand_symbols_and_intervals(self):

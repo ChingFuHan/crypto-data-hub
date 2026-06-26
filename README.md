@@ -111,9 +111,42 @@ output is git-ignored runtime data under `local_data/` — never commit it.
 .venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --once
 ```
 
+#### `--symbols` accepted formats
+
+Small symbol set (all equivalent):
+
+```bash
+--symbols BTCUSDT ETHUSDT
+--symbols "BTCUSDT ETHUSDT"
+--symbols BTCUSDT,ETHUSDT
+```
+
+Whole market (all currently tradable Binance USD-M USDT perpetuals, resolved
+via `/fapi/v1/exchangeInfo`):
+
+```bash
+--symbols all
+```
+
+Whole-market smoke test (resolve all, then keep the first 5):
+
+```bash
+--symbols all --max-symbols 5
+```
+
+Symbols are normalized to upper case and de-duplicated. Data-writing modes
+(`--once`, `--run-startup-backfill-once`, the default run) fail with a clear
+message if `--symbols` is omitted — they never silently span the whole market.
+
+> ⚠️ `--symbols all` greatly increases REST / WebSocket / IO pressure. Do **not**
+> pair it with `--interval all` for a first run. Validate a small scope on a new
+> machine first, then widen.
+
 > `--interval all` is a CLI expansion semantic only and is **never** sent to
-> the Binance API. Unclosed Kbars must never enter `closed_buffer` or the
-> current dataset. WebSocket / REST / webhook share one Kbar validation path.
+> the Binance API. Likewise `all` is never sent as a symbol to `/fapi/v1/klines`
+> nor used in a WebSocket stream name. Unclosed Kbars must never enter
+> `closed_buffer` or the current dataset. WebSocket / REST / webhook share one
+> Kbar validation path.
 
 > **Registry note:** `market.binance.um.klines.current` and
 > `market.binance.um.klines.live_update` are **not yet registered** in

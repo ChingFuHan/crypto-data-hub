@@ -146,15 +146,16 @@ all
 優先順序：
 
 ```text
-1. --symbols
+1. --symbols（含 all 展開）
 2. --symbols-file
-3. exchangeInfo currently TRADING symbols
 ```
 
-若 CLI 指定：
+`--symbols` 接受以下等價寫法（normalize 成大寫並去重，保持順序）：
 
 ```bash
---symbols BTCUSDT ETHUSDT SOLUSDT
+--symbols BTCUSDT ETHUSDT
+--symbols "BTCUSDT ETHUSDT"
+--symbols BTCUSDT,ETHUSDT
 ```
 
 使用指定 symbols。
@@ -167,7 +168,10 @@ all
 
 從檔案讀取 symbols，每行一個 symbol。
 
-若都未指定，自動呼叫：
+### `--symbols all`
+
+`all` 是 CLI expansion sentinel，代表 Binance USD-M Futures 目前可交易的
+USDT 永續合約。resolver 呼叫：
 
 ```text
 GET https://fapi.binance.com/fapi/v1/exchangeInfo
@@ -181,11 +185,37 @@ contractType = PERPETUAL
 quoteAsset = USDT
 ```
 
-排序：
+排序依 symbol 字母排序。
+
+限制：
+
+- **不**使用 spot `/api/v3/exchangeInfo`。
+- `all` 只在 CLI expansion 使用，resolve 成具體 symbols 後才進入
+  per-symbol REST / WebSocket / backfill / continuity 流程。
+- 絕不把 `all` 當 symbol 傳給 `/fapi/v1/klines`，不產生 `all@kline_*`
+  WebSocket stream，也不寫進 state / parquet / buffer。
+
+全市場 smoke test：
+
+```bash
+--symbols all --max-symbols 5
+```
+
+先 resolve 全市場，再截斷前 5 個（startup summary 的 `symbols_count`
+反映截斷後數量）。這是 smoke test 用，不是新的 universe 定義。
+
+### 未提供 `--symbols`
+
+寫資料或可能產生大量工作量的模式（`--once`、
+`--run-startup-backfill-once`、預設 live run）若未提供 `--symbols`，會明確
+失敗，不會默默全市場：
 
 ```text
-依 symbol 字母排序
+no symbols provided. Please provide --symbols BTCUSDT ETHUSDT or --symbols all ...
 ```
+
+純 describe / layout 類模式維持既有行為，但不會把未提供 symbols 解讀成全市場
+寫入。
 
 若指定：
 
@@ -193,7 +223,10 @@ quoteAsset = USDT
 --max-symbols 20
 ```
 
-只取前 20 個。
+resolve 後只取前 20 個。
+
+> ⚠️ `--symbols all` 會增加 REST / WebSocket / IO 壓力，不建議一開始就搭配
+> `--interval all` 全市場跑；新機器先小範圍驗收再擴大。
 
 ---
 

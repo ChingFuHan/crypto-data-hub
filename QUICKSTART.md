@@ -190,6 +190,32 @@ before any commit).
 .venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --once
 ```
 
+`--symbols` accepts these equivalent small-scope forms:
+
+```bash
+--symbols BTCUSDT ETHUSDT
+--symbols "BTCUSDT ETHUSDT"
+--symbols BTCUSDT,ETHUSDT
+```
+
+Whole market (Binance USD-M USDT perpetuals, resolved via
+`/fapi/v1/exchangeInfo`):
+
+```bash
+--symbols all
+```
+
+Whole-market smoke test (resolve all, keep the first 5):
+
+```bash
+--symbols all --max-symbols 5
+```
+
+> ⚠️ `--symbols all` increases REST / WebSocket / IO pressure. Don't combine it
+> with `--interval all` on a first run — validate a small scope first, then
+> widen. Data-writing modes refuse to run without `--symbols`; they never
+> default to the whole market.
+
 What gets written (all git-ignored):
 
 - Current dataset: `local_data/binance_um_klines_current/interval=1m/parquet/`

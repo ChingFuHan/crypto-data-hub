@@ -24,11 +24,29 @@
 
 ## 3. 指定 symbols
 
+小範圍 symbols（以下三種等價，normalize 成大寫並去重）：
+
+```bash
+--symbols BTCUSDT ETHUSDT
+--symbols "BTCUSDT ETHUSDT"
+--symbols BTCUSDT,ETHUSDT
+```
+
 ```bash
 .venv/bin/python scripts/live_update.py \
-  --interval all \
-  --symbols BTCUSDT ETHUSDT SOLUSDT
+  --interval 1m \
+  --symbols BTCUSDT ETHUSDT
 ```
+
+全市場（Binance USD-M USDT 永續，透過 `/fapi/v1/exchangeInfo` resolve）：
+
+```bash
+--symbols all
+```
+
+> ⚠️ `--symbols all` 會增加 REST / WebSocket / IO 壓力。不建議一開始直接搭配
+> `--interval all` 全市場跑。新機器應先小範圍驗收，再擴大。未提供 `--symbols`
+> 的寫資料模式會明確失敗，不會默默全市場。
 
 ---
 
@@ -53,13 +71,18 @@
 
 ---
 
-## 6. 限制 symbols 數量
+## 6. 限制 symbols 數量（全市場 smoke test）
+
+先 resolve 全市場再截斷前 N 個（smoke test 用，不是新的 universe 定義）：
 
 ```bash
 .venv/bin/python scripts/live_update.py \
-  --interval all \
-  --max-symbols 20
+  --interval 1m \
+  --symbols all \
+  --max-symbols 5
 ```
+
+startup summary 的 `symbols_count` 反映截斷後的數量。
 
 ---
 

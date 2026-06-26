@@ -46,6 +46,20 @@ docs/live_update/09_RUNBOOK.md
   `--check-continuity`、`--describe-layout`、`--describe-websocket-connections`、
   `--describe-webhook-server` 等模式。`all` 僅為 CLI 展開語意，絕不傳給
   Binance API。
+- **`--symbols` parsing。** 支援以下等價小範圍寫法：
+  `--symbols BTCUSDT ETHUSDT`、`--symbols "BTCUSDT ETHUSDT"`、
+  `--symbols BTCUSDT,ETHUSDT`。symbols 會 normalize 成大寫並去重。
+  全市場用 `--symbols all`（Binance USD-M USDT 永續，透過
+  `/fapi/v1/exchangeInfo` resolve，篩選 `status=TRADING` /
+  `contractType=PERPETUAL` / `quoteAsset=USDT`，**不**使用 spot
+  `/api/v3/exchangeInfo`）。全市場 smoke test 用
+  `--symbols all --max-symbols 5`（先 resolve 全市場再截斷前 5 個）。
+  `all` 只在 CLI expansion 使用，絕不當作 symbol 傳給 `/fapi/v1/klines`，
+  也不會出現在 WebSocket stream name 或寫進 state / parquet / buffer。
+  寫資料的模式（`--once`、`--run-startup-backfill-once`、預設 run）若未提供
+  `--symbols` 會明確失敗，不會默默全市場。
+  ⚠️ `--symbols all` 會增加 REST / WebSocket / IO 壓力，不建議一開始就搭配
+  `--interval all` 全市場跑；新機器先小範圍驗收再擴大。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是
   MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
   daemon。orchestration、retention manager、長時間全市場 all-interval 部署

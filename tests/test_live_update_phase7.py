@@ -16,7 +16,7 @@ class TestLiveUpdatePhase7(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args([])
         self.assertEqual(args.interval, "all")
-        self.assertEqual(args.symbols, "")
+        self.assertIsNone(args.symbols)
         self.assertEqual(args.max_symbols, 0)
         self.assertEqual(args.ws_batch_size, 100)
         self.assertEqual(args.max_streams_per_connection, 1024)
@@ -75,7 +75,7 @@ class TestLiveUpdatePhase7(unittest.TestCase):
         mock_urlopen.return_value = mock_response
 
         symbols = resolve_symbols(
-            symbols_arg="",
+            symbols_arg="all",
             symbols_file_arg="",
             max_symbols=0,
         )

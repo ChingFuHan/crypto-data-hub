@@ -1400,6 +1400,11 @@ def rest_klines_url(
     limit: int,
 ) -> str:
     validate_interval(interval)
+    if symbol.lower() == "all":
+        raise LiveUpdateCommandError(
+            "symbol 'all' is a CLI expansion token and must be resolved to "
+            "concrete symbols before calling /fapi/v1/klines"
+        )
     params: dict[str, Any] = {
         "symbol": symbol.upper(),
         "interval": interval,
@@ -1964,6 +1969,11 @@ def run_gap_repair_once(
 
 def websocket_stream_name(symbol: str, interval: str) -> str:
     validate_interval(interval)
+    if symbol.lower() == "all":
+        raise LiveUpdateCommandError(
+            "symbol 'all' is a CLI expansion token and must be resolved to "
+            "concrete symbols before building a WebSocket stream name"
+        )
     return f"{symbol.lower()}@kline_{interval}"
 
 
@@ -2973,43 +2983,66 @@ def build_webhook_server(config: WebhookServerConfig) -> ThreadingHTTPServer:
     return server
 
 
-def resolve_symbols(
-    symbols_arg: str,
-    symbols_file_arg: str,
-    max_symbols: int,
+ALL_SYMBOLS_TOKEN = "all"
+REST_EXCHANGE_INFO_PATH = "/fapi/v1/exchangeInfo"
+SYMBOLS_REQUIRED_MESSAGE = (
+    "no symbols provided. Please provide --symbols BTCUSDT ETHUSDT "
+    "or --symbols all (Binance USD-M Futures USDT perpetuals)."
+)
+
+
+def parse_symbols_arg(raw: str | list[str] | None) -> list[str]:
+    """Normalize raw ``--symbols`` CLI input into a list or the ``["all"]`` sentinel.
+
+    Accepts argparse ``nargs`` results (a list of tokens), a single string, or
+    ``None``. Each token is split on commas and whitespace so all of these are
+    equivalent::
+
+        --symbols BTCUSDT ETHUSDT
+        --symbols "BTCUSDT ETHUSDT"
+        --symbols BTCUSDT,ETHUSDT
+
+    Symbols are upper-cased and de-duplicated while preserving first-seen order.
+    The special token ``all`` (any case) is a CLI expansion sentinel: it returns
+    ``["all"]`` so callers must resolve it to concrete symbols via
+    ``/fapi/v1/exchangeInfo`` before any REST / WebSocket / state / parquet use.
+    """
+    if raw is None:
+        tokens: list[str] = []
+    elif isinstance(raw, str):
+        tokens = [raw]
+    else:
+        tokens = list(raw)
+
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        for chunk in str(token).replace(",", " ").split():
+            normalized = chunk.strip().upper()
+            if not normalized:
+                continue
+            if normalized == ALL_SYMBOLS_TOKEN.upper():
+                # ``all`` is only ever a whole-market expansion, never mixed with
+                # concrete symbols. Resolve it on its own.
+                return [ALL_SYMBOLS_TOKEN]
+            if normalized not in seen:
+                seen.add(normalized)
+                parsed.append(normalized)
+    return parsed
+
+
+def fetch_um_perpetual_usdt_symbols(
     base_url: str = BINANCE_REST_BASE_URL,
     timeout: float = 15.0,
 ) -> list[str]:
-    symbols: list[str] = []
+    """Resolve ``--symbols all`` to currently tradable USD-M USDT perpetuals.
 
-    # 1. --symbols
-    if symbols_arg:
-        for chunk in symbols_arg.replace(",", " ").split():
-            symbol = chunk.strip().upper()
-            if symbol:
-                symbols.append(symbol)
-        if symbols:
-            if max_symbols > 0:
-                return symbols[:max_symbols]
-            return symbols
-
-    # 2. --symbols-file
-    if symbols_file_arg:
-        path = Path(symbols_file_arg)
-        if not path.is_file():
-            raise LiveUpdateCommandError(f"symbols file not found: {symbols_file_arg}")
-        lines = path.read_text("utf-8").splitlines()
-        for line in lines:
-            line = line.strip().upper()
-            if line and not line.startswith("#"):
-                symbols.append(line)
-        if symbols:
-            if max_symbols > 0:
-                return symbols[:max_symbols]
-            return symbols
-
-    # 3. exchangeInfo
-    url = urllib.parse.urljoin(base_url, "/fapi/v1/exchangeInfo")
+    Uses the Binance USD-M Futures ``/fapi/v1/exchangeInfo`` endpoint (never the
+    spot ``/api/v3/exchangeInfo``) and keeps only symbols where
+    ``status == "TRADING"``, ``contractType == "PERPETUAL"`` and
+    ``quoteAsset == "USDT"``. The result is sorted for deterministic truncation.
+    """
+    url = base_url.rstrip("/") + REST_EXCHANGE_INFO_PATH
     req = urllib.request.Request(url, headers={"User-Agent": "crypto-data-hub/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -3019,11 +3052,57 @@ def resolve_symbols(
     except json.JSONDecodeError as exc:
         raise LiveUpdateCommandError(f"invalid exchangeInfo JSON: {exc}") from exc
 
+    symbols: list[str] = []
     for s in payload.get("symbols", []):
-        if s.get("status") == "TRADING" and s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT":
-            symbols.append(s["symbol"].upper())
-
+        if (
+            s.get("status") == "TRADING"
+            and s.get("contractType") == "PERPETUAL"
+            and s.get("quoteAsset") == "USDT"
+        ):
+            symbols.append(str(s["symbol"]).upper())
     symbols.sort()
+    return symbols
+
+
+def _read_symbols_file(symbols_file_arg: str) -> list[str]:
+    path = Path(symbols_file_arg)
+    if not path.is_file():
+        raise LiveUpdateCommandError(f"symbols file not found: {symbols_file_arg}")
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for line in path.read_text("utf-8").splitlines():
+        line = line.strip().upper()
+        if line and not line.startswith("#") and line not in seen:
+            seen.add(line)
+            symbols.append(line)
+    return symbols
+
+
+def resolve_symbols(
+    symbols_arg: str | list[str] | None,
+    symbols_file_arg: str,
+    max_symbols: int,
+    base_url: str = BINANCE_REST_BASE_URL,
+    timeout: float = 15.0,
+) -> list[str]:
+    """Resolve CLI symbol input into a concrete, normalized symbol list.
+
+    Resolution order: ``--symbols`` (with ``all`` expanding via exchangeInfo),
+    then ``--symbols-file``. Missing input returns ``[]`` -- it never silently
+    expands to the whole market; callers decide whether an empty result is fatal.
+    ``--max-symbols`` truncates the final list (smoke-test aid, not a universe).
+    """
+    parsed = parse_symbols_arg(symbols_arg)
+
+    if parsed == [ALL_SYMBOLS_TOKEN]:
+        symbols = fetch_um_perpetual_usdt_symbols(base_url, timeout)
+    elif parsed:
+        symbols = parsed
+    elif symbols_file_arg:
+        symbols = _read_symbols_file(symbols_file_arg)
+    else:
+        return []
+
     if max_symbols > 0:
         return symbols[:max_symbols]
     return symbols
@@ -3036,7 +3115,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--interval", default="all", choices=CLI_INTERVALS)
-    parser.add_argument("--symbols", default="")
+    parser.add_argument(
+        "--symbols",
+        nargs="*",
+        default=None,
+        metavar="SYMBOL",
+        help=(
+            "symbols to run, e.g. --symbols BTCUSDT ETHUSDT, "
+            "--symbols \"BTCUSDT ETHUSDT\", --symbols BTCUSDT,ETHUSDT, "
+            "or --symbols all for all Binance USD-M USDT perpetuals"
+        ),
+    )
     parser.add_argument("--symbols-file", default="")
     parser.add_argument("--max-symbols", type=int, default=0)
     parser.add_argument("--lookback-bars", type=int, default=3)
@@ -3280,20 +3369,15 @@ def run(args: argparse.Namespace) -> int:
         # provided, otherwise discover symbols from the current dataset so the
         # acceptance check stays clone-safe. When combined with --once, the
         # once flow runs the continuity check at its final step instead.
-        continuity_symbols: list[str] = []
-        if args.symbols:
-            continuity_symbols = [
-                chunk.strip().upper()
-                for chunk in args.symbols.replace(",", " ").split()
-                if chunk.strip()
-            ]
-        elif args.symbols_file:
+        continuity_symbols = parse_symbols_arg(args.symbols)
+        if continuity_symbols == [ALL_SYMBOLS_TOKEN]:
+            # Continuity is network-free: ``all`` falls back to dataset discovery
+            # rather than calling exchangeInfo.
+            continuity_symbols = []
+        if not continuity_symbols and args.symbols_file:
             sf_path = Path(args.symbols_file)
             if sf_path.is_file():
-                for line in sf_path.read_text("utf-8").splitlines():
-                    line = line.strip().upper()
-                    if line and not line.startswith("#"):
-                        continuity_symbols.append(line)
+                continuity_symbols = _read_symbols_file(args.symbols_file)
         now_ms_cc = args.now_ms
         if now_ms_cc is None:
             now_ms_cc = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -3329,9 +3413,7 @@ def run(args: argparse.Namespace) -> int:
 
     if args.plan_startup_backfill:
         if not symbols:
-            raise LiveUpdateCommandError(
-                "--symbols or exchangeInfo is required for Phase 3 startup backfill planning"
-            )
+            raise LiveUpdateCommandError(SYMBOLS_REQUIRED_MESSAGE)
         plans = plan_startup_backfill(
             intervals,
             symbols,
@@ -3350,9 +3432,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.run_startup_backfill_once:
         if not symbols:
-            raise LiveUpdateCommandError(
-                "--symbols or exchangeInfo is required for Phase 4 startup backfill"
-            )
+            raise LiveUpdateCommandError(SYMBOLS_REQUIRED_MESSAGE)
         results_backfill = run_startup_backfill_once(
             intervals,
             symbols,
@@ -3377,9 +3457,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.describe_websocket_connections:
         if not symbols:
-            raise LiveUpdateCommandError(
-                "--symbols or exchangeInfo is required for Phase 5 WebSocket connection planning"
-            )
+            raise LiveUpdateCommandError(SYMBOLS_REQUIRED_MESSAGE)
         specs = build_websocket_connection_specs(
             symbols,
             intervals,
@@ -3422,6 +3500,12 @@ def run(args: argparse.Namespace) -> int:
         }
         print(pretty_json(payload_wh), end="")
         return 0
+
+    # Live update default run and --once both write data / open many streams, so
+    # a missing --symbols must fail loudly rather than silently spanning the whole
+    # market.
+    if not symbols:
+        raise LiveUpdateCommandError(SYMBOLS_REQUIRED_MESSAGE)
 
     # Live update default run
     print("1. parse CLI")
