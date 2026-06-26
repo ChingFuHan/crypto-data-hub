@@ -162,23 +162,34 @@ class EnsureCurrentSymbolTests(unittest.TestCase):
             self.assertTrue((current_root / "symbol=ETHUSDT").exists())
             self.assertFalse((current_root / "symbol=BTCUSDT").exists())
 
-    def test_failed_copy_leaves_no_half_written_target(self):
+    def test_failed_conversion_leaves_no_half_written_target_or_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_seed_symbol(tmp, open_times=(BASE_OT,))
             paths = make_paths(tmp)
             current_symbol_root = (
                 paths.current_parquet_root("1m") / "symbol=ETHUSDT"
             )
-            with patch("shutil.copytree", side_effect=OSError("disk full")):
+            # Conversion now reads the seed and re-writes year/month layout; force
+            # the merge write to fail mid-conversion.
+            with patch.object(
+                lu,
+                "merge_records_to_current_partition",
+                side_effect=OSError("disk full"),
+            ):
                 with self.assertRaises(OSError):
                     lu.ensure_current_symbol_from_seed("1m", "ETHUSDT", paths)
-            # Target never created; no leftover temp dirs that could be mistaken
-            # for a complete current symbol.
+            # Target never created; no leftover stage/temp dirs that could be
+            # mistaken for a complete current symbol.
             self.assertFalse(current_symbol_root.exists())
             parquet_root = paths.current_parquet_root("1m")
             if parquet_root.exists():
                 self.assertEqual(
-                    [p for p in parquet_root.iterdir() if ".tmp-" in p.name], []
+                    [
+                        p
+                        for p in parquet_root.iterdir()
+                        if ".stage-" in p.name or ".tmp-" in p.name
+                    ],
+                    [],
                 )
 
 

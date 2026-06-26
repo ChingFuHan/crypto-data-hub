@@ -1031,25 +1031,91 @@ class CurrentSymbolInitResult:
         return payload
 
 
-def _atomic_copy_symbol_dir(src: Path, dst: Path) -> None:
-    """Copy a seed symbol directory into the current dataset atomically.
+def _seed_symbol_records(
+    interval: str,
+    symbol: str,
+    seed_symbol_root: Path,
+) -> list["KlineRecord"]:
+    """Read every seed parquet row for one symbol into normalized KlineRecords.
 
-    Copies into a sibling temp directory first, then renames it onto the target
-    so a failed copy never leaves a half-written directory that later code could
-    mistake for a complete current symbol. Never overwrites an existing target
-    and never touches the source.
+    The seed may use a year-only Hive layout; that is fine, because each record's
+    canonical ``year``/``month`` are re-derived from ``open_time`` when written
+    into the current dataset.
     """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.parent / (dst.name + f".tmp-{os.getpid()}")
-    if tmp.exists():
-        shutil.rmtree(tmp)
+    require_pyarrow()
+    normalized = symbol.upper()
+    fallback_key = PartitionKey(interval, normalized, 0, 1)
+    records: list[KlineRecord] = []
+    for path in sorted(seed_symbol_root.rglob("*.parquet")):
+        for row in read_current_partition_rows(path, fallback_key):
+            records.append(
+                KlineRecord.build(
+                    symbol=normalized,
+                    interval=str(row["interval"]),
+                    open_time=row["open_time"],
+                    open=row["open"],
+                    high=row["high"],
+                    low=row["low"],
+                    close=row["close"],
+                    volume=row["volume"],
+                    close_time=row["close_time"],
+                    quote_volume=row["quote_volume"],
+                    trade_count=row["trade_count"],
+                    taker_buy_base_volume=row["taker_buy_base_volume"],
+                    taker_buy_quote_volume=row["taker_buy_quote_volume"],
+                    source_archive=str(row["source_archive"]),
+                    archive_source=str(row["archive_source"]),
+                    archive_period=str(row["archive_period"]),
+                    schema_version=row.get("schema_version", SCHEMA_VERSION),
+                    dataset_version=row.get("dataset_version", DATASET_VERSION),
+                )
+            )
+    return records
+
+
+def _convert_seed_symbol_to_current(
+    interval: str,
+    symbol: str,
+    paths: "LiveUpdatePaths",
+    seed_symbol_root: Path,
+    current_symbol_root: Path,
+) -> int:
+    """Write one symbol's seed parquet into current using year/month layout.
+
+    Reads the seed (any layout), re-partitions by canonical ``year``/``month``
+    derived from ``open_time``, stages the result in a sibling temp directory,
+    then atomically renames it onto the target. A failed conversion leaves no
+    target directory that could be mistaken for a complete current symbol, never
+    overwrites an existing target, and never modifies the seed. Returns the row
+    count written (0 if the seed has no rows).
+    """
+    require_pyarrow()
+    normalized = symbol.upper()
+    records = _seed_symbol_records(interval, normalized, seed_symbol_root)
+    if not records:
+        return 0
+    current_symbol_root.parent.mkdir(parents=True, exist_ok=True)
+    stage_root = current_symbol_root.parent / f".stage-{current_symbol_root.name}.{os.getpid()}"
+    if stage_root.exists():
+        shutil.rmtree(stage_root)
     try:
-        shutil.copytree(src, tmp)
-        os.replace(tmp, dst)
+        stage_paths = LiveUpdatePaths(
+            repo_root=stage_root,
+            current_dataset_root=Path("current"),
+        )
+        _merge_closed_records_by_partition(records, stage_paths)
+        staged_symbol_dir = (
+            stage_paths.current_parquet_root(interval) / f"symbol={normalized}"
+        )
+        os.replace(staged_symbol_dir, current_symbol_root)
     except BaseException:
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
+        if current_symbol_root.exists():
+            shutil.rmtree(current_symbol_root, ignore_errors=True)
         raise
+    finally:
+        if stage_root.exists():
+            shutil.rmtree(stage_root, ignore_errors=True)
+    return len(records)
 
 
 def ensure_current_symbol_from_seed(
@@ -1093,14 +1159,29 @@ def ensure_current_symbol_from_seed(
             message="historical seed parquet is missing for this symbol",
         )
 
-    _atomic_copy_symbol_dir(seed_symbol_root, current_symbol_root)
+    rows_written = _convert_seed_symbol_to_current(
+        interval,
+        normalized,
+        resolver,
+        seed_symbol_root,
+        current_symbol_root,
+    )
+    if rows_written == 0:
+        return CurrentSymbolInitResult(
+            interval=interval,
+            symbol=normalized,
+            status=CURRENT_SYMBOL_BOOTSTRAP_REQUIRED,
+            seed_symbol_root=seed_symbol_root,
+            current_symbol_root=current_symbol_root,
+            message="seed symbol parquet has no rows",
+        )
     return CurrentSymbolInitResult(
         interval=interval,
         symbol=normalized,
         status=CURRENT_SYMBOL_INITIALIZED_FROM_SEED,
         seed_symbol_root=seed_symbol_root,
         current_symbol_root=current_symbol_root,
-        message="copied seed symbol into current dataset",
+        message="converted seed symbol into current dataset (year/month layout)",
     )
 
 
@@ -1122,6 +1203,124 @@ def ensure_current_symbols_from_seed(
             continue
         results.append(ensure_current_symbol_from_seed(interval, normalized, resolver))
     return results
+
+
+# Canonical current-dataset partition layout governance.
+CURRENT_LAYOUT_OK = "ok"
+CURRENT_LAYOUT_MIXED = "mixed_layout_detected"
+
+
+def _symbol_partition_files(symbol_root: Path) -> list[tuple[Path, bool]]:
+    """Return ``(parquet_path, has_month)`` for each parquet under a symbol dir.
+
+    ``has_month`` is True when a ``month=<MM>`` Hive segment is present (canonical
+    year/month layout) and False for the legacy year-only layout.
+    """
+    files: list[tuple[Path, bool]] = []
+    for path in sorted(symbol_root.rglob("*.parquet")):
+        rel_parts = path.relative_to(symbol_root).parts
+        has_month = any(part.startswith("month=") for part in rel_parts)
+        files.append((path, has_month))
+    return files
+
+
+def audit_current_partition_layout(
+    interval: str,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+) -> dict[str, Any]:
+    """Read-only audit of the current dataset partition layout for one interval.
+
+    Detects legacy year-only parquet, canonical year/month parquet, and symbols
+    that mix both layouts. Never writes or moves any file. When ``symbols`` is
+    empty, audits every symbol discovered in the current dataset.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    current_root = resolver.current_parquet_root(interval)
+
+    target_symbols = [s.strip().upper() for s in symbols if s.strip()]
+    if not target_symbols:
+        target_symbols = discover_current_dataset_symbols(interval, resolver)
+    target_symbols = sorted(set(target_symbols))
+
+    year_only_total = 0
+    year_month_total = 0
+    mixed_symbols: list[str] = []
+    per_symbol: dict[str, dict[str, int]] = {}
+    for symbol in target_symbols:
+        symbol_root = current_root / f"symbol={symbol}"
+        sym_year_only = 0
+        sym_year_month = 0
+        if symbol_root.exists():
+            for _path, has_month in _symbol_partition_files(symbol_root):
+                if has_month:
+                    sym_year_month += 1
+                else:
+                    sym_year_only += 1
+        year_only_total += sym_year_only
+        year_month_total += sym_year_month
+        per_symbol[symbol] = {
+            "year_only_file_count": sym_year_only,
+            "year_month_file_count": sym_year_month,
+        }
+        if sym_year_only > 0 and sym_year_month > 0:
+            mixed_symbols.append(symbol)
+
+    return {
+        "interval": interval,
+        "symbols": target_symbols,
+        "year_only_file_count": year_only_total,
+        "year_month_file_count": year_month_total,
+        "mixed_symbol_count": len(mixed_symbols),
+        "mixed_symbols": mixed_symbols,
+        "per_symbol": per_symbol,
+        "status": CURRENT_LAYOUT_MIXED if mixed_symbols else CURRENT_LAYOUT_OK,
+    }
+
+
+def validate_current_partition_layout(
+    interval: str,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+) -> bool:
+    """Return True iff the audited current layout has no mixed-layout symbols."""
+    audit = audit_current_partition_layout(interval, symbols, paths)
+    return audit["status"] == CURRENT_LAYOUT_OK
+
+
+def plan_current_layout_migration(
+    interval: str,
+    symbols: list[str],
+    paths: LiveUpdatePaths | None = None,
+) -> dict[str, Any]:
+    """Dry-run plan of which year-only current files would convert to year/month.
+
+    NEVER moves or writes files -- it only reports what a future migration would
+    touch so a plan can be surfaced without auto-migrating real data.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+    audit = audit_current_partition_layout(interval, symbols, resolver)
+    current_root = resolver.current_parquet_root(interval)
+    would_convert: list[str] = []
+    for symbol in audit["symbols"]:
+        symbol_root = current_root / f"symbol={symbol}"
+        if not symbol_root.exists():
+            continue
+        for path, has_month in _symbol_partition_files(symbol_root):
+            if not has_month:
+                would_convert.append(str(path))
+    return {
+        "interval": interval,
+        "symbols": audit["symbols"],
+        "status": audit["status"],
+        "year_only_file_count": audit["year_only_file_count"],
+        "year_month_file_count": audit["year_month_file_count"],
+        "would_convert_file_count": len(would_convert),
+        "would_convert_files": would_convert,
+        "note": "dry-run only; this command does not migrate real data",
+    }
 
 
 def _current_parquet_schema():
@@ -3338,6 +3537,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print Phase 6 webhook server config and health payload, then exit",
     )
+    parser.add_argument(
+        "--audit-current-layout",
+        action="store_true",
+        help=(
+            "read-only audit of current dataset partition layout "
+            "(year-only vs canonical year/month, mixed layout); writes nothing"
+        ),
+    )
     return parser
 
 
@@ -3571,6 +3778,42 @@ def run(args: argparse.Namespace) -> int:
             now_ms=now_ms_cc,
         )
         print(pretty_json(payload_cc), end="")
+        return 0
+
+    if args.audit_current_layout:
+        # Read-only and network-free: use --symbols / --symbols-file if provided,
+        # otherwise audit every symbol discovered in the current dataset. ``all``
+        # falls back to dataset discovery rather than calling exchangeInfo. This
+        # mode writes nothing and never migrates data.
+        audit_symbols = parse_symbols_arg(args.symbols)
+        if audit_symbols == [ALL_SYMBOLS_TOKEN]:
+            audit_symbols = []
+        if not audit_symbols and args.symbols_file:
+            sf_path = Path(args.symbols_file)
+            if sf_path.is_file():
+                audit_symbols = _read_symbols_file(args.symbols_file)
+        interval_results = {
+            interval: audit_current_partition_layout(interval, audit_symbols, paths)
+            for interval in intervals
+        }
+        overall = (
+            CURRENT_LAYOUT_MIXED
+            if any(
+                result["status"] == CURRENT_LAYOUT_MIXED
+                for result in interval_results.values()
+            )
+            else CURRENT_LAYOUT_OK
+        )
+        payload_audit = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "active_intervals": list(intervals),
+            "canonical_layout": "symbol=<SYMBOL>/year=<YYYY>/month=<MM>/part-000.parquet",
+            "overall_status": overall,
+            "interval_results": interval_results,
+        }
+        print(pretty_json(payload_audit), end="")
         return 0
 
     # All other commands require symbol resolution

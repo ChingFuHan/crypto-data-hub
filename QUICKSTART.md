@@ -251,6 +251,20 @@ never touches the seed). Statuses: `initialized_current_symbol_from_seed`,
 `already_available`, or `bootstrap_required` (seed genuinely missing). Don't
 initialize the whole market up front — validate a small scope first.
 
+**Current dataset layout = year/month.** The canonical current layout is
+`symbol=<S>/year=<YYYY>/month=<MM>/part-000.parquet`. The historical seed may
+still be year-only (`symbol=<S>/year=<YYYY>/part-000.parquet`); initialization
+from seed **converts** it to year/month (re-derived from `open_time`), so it does
+not copy the year-only layout into current. If a symbol ends up with both
+year-only and year/month parquet in current, that's a *mixed layout* (DuckDB
+`hive_partitioning=true` will error). Audit it read-only — writes nothing, no
+auto-migration:
+
+```bash
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols BTCUSDT ETHUSDT --audit-current-layout
+```
+
 What gets written (all git-ignored):
 
 - Current dataset: `local_data/binance_um_klines_current/interval=1m/parquet/`

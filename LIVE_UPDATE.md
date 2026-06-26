@@ -77,6 +77,16 @@ docs/live_update/09_RUNBOOK.md
   closed KBar；seed 缺時仍回 bootstrap_required。狀態：
   `bootstrap_required` / `initialized_current_symbol_from_seed` /
   `already_available`。
+- **Current dataset canonical layout = year/month。** current parquet canonical
+  layout 為 `symbol=<S>/year=<YYYY>/month=<MM>/part-000.parquet`（live update /
+  gap repair / merge 的 canonical target）。historical seed 可以仍是 year-only；
+  current initialization from seed 會讀 seed parquet、依 `open_time` 推導
+  canonical year/month 重新寫出（temp dir 後 atomic rename），不把 year-only
+  原樣 copy 進 current。若 current 同一 symbol 同時有 year-only 與 year/month
+  parquet 即 mixed layout（DuckDB hive partition mismatch）。用
+  `--audit-current-layout`（read-only，輸出 JSON：`year_only_file_count` /
+  `year_month_file_count` / `mixed_symbol_count` / `mixed_symbols` / `status`）
+  檢查。本次只提供 audit / dry-run plan，**不**自動 migration 既有舊資料。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是
   MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
   daemon。orchestration、retention manager、長時間全市場 all-interval 部署

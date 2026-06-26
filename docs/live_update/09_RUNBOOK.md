@@ -441,6 +441,59 @@ bootstrap_required                    seed 也缺 -> 需先建歷史 seed
   資料、不改 seed、不寫 dataset_registry.json。
 - 不建議一開始就全市場初始化；先小範圍驗收再擴大。
 
+備註（layout）：initialize from seed 會把 seed parquet **轉換**成 current 的
+canonical year/month layout（依 `open_time` 推導），不會把 seed 的 year-only
+layout 原樣 copy 進 current。詳見第 20c 節。
+
+---
+
+## 20c. Current dataset layout audit（year/month governance）
+
+current parquet canonical layout：
+
+```text
+symbol=<SYMBOL>/year=<YYYY>/month=<MM>/part-000.parquet
+```
+
+- historical seed 可以仍是 year-only：`symbol=<SYMBOL>/year=<YYYY>/part-000.parquet`。
+- live update merge / gap repair / initialize-from-seed 一律寫 year/month。
+- 若 current 同一 symbol 同時有 year-only 與 year/month parquet = mixed layout，
+  DuckDB `hive_partitioning=true` 會報 Hive partition mismatch。
+
+檢查（read-only，不改資料、不 migration）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols BTCUSDT ETHUSDT \
+  --audit-current-layout
+```
+
+或全市場 smoke 範圍：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols all --max-symbols 5 \
+  --audit-current-layout
+```
+
+輸出 JSON（每 interval）：
+
+```text
+year_only_file_count
+year_month_file_count
+mixed_symbol_count
+mixed_symbols
+status        ok / mixed_layout_detected
+```
+
+注意：
+
+- `--audit-current-layout` 只讀檔案，不寫 parquet / jsonl / state，不自動 migration。
+- 本次僅提供 audit 與 dry-run plan（`plan_current_layout_migration`）；既有 mixed
+  layout 舊資料需另行人工處理，不會自動搬移。
+
 ---
 
 ## 21. current dataset 重建

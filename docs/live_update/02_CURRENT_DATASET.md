@@ -143,6 +143,44 @@ local_data/binance_um_klines_current/interval=1m/parquet/
         part-000.parquet
 ```
 
+### 4.1 Canonical layout governance（year/month）
+
+current dataset 的 **canonical partition layout 是 year/month**：
+
+```text
+symbol=<SYMBOL>/year=<YYYY>/month=<MM>/part-000.parquet
+```
+
+這是 live update / gap repair / append merge 的 canonical write target。
+
+規則：
+
+- historical seed（`local_data/binance_um_klines/...`）**可以**仍是 year-only：
+  `symbol=<SYMBOL>/year=<YYYY>/part-000.parquet`。
+- current initialization from seed **會轉換**成 year/month：讀 seed parquet，依
+  `open_time` 推導的 canonical `year`/`month` 重新寫出。不會把 seed 的 year-only
+  layout 原樣 copy 進 current。轉換走 temp dir 後 atomic rename；失敗不留半成品、
+  不覆蓋既有 current symbol、不改 seed。
+- 若 current 內**同一 symbol 同時存在** year-only 與 year/month parquet，屬於
+  **mixed layout**。DuckDB `hive_partitioning=true` 會因此報 Hive partition
+  mismatch。
+
+#### 檢查（dry-run，不改資料）
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --symbols BTCUSDT ETHUSDT \
+  --audit-current-layout
+```
+
+輸出 JSON：`year_only_file_count`、`year_month_file_count`、`mixed_symbol_count`、
+`mixed_symbols`、`status`（`ok` / `mixed_layout_detected`）。此模式只讀檔案，
+**不寫** parquet / jsonl / state，**不**自動 migration。
+
+> 本次只提供 audit / dry-run migration plan（`plan_current_layout_migration`），
+> **不會**自動搬移既有 current 舊資料。舊的 mixed layout 需另行人工處理。
+
 ---
 
 ## 5. Primary Key
