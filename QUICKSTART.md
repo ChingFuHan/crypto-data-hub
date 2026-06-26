@@ -282,10 +282,10 @@ precheck reads many parquet files and can be slow — scope it with `--symbols`.
 To actually migrate one symbol to canonical year/month, use
 `--migrate-current-layout` (dry-run by default; add `--execute` to write). It
 requires explicit `--symbols` and a single concrete `--interval` (`all` rejected
-in both), stages + verifies the rewrite, backs up the original
-(`symbol=<S>.__backup_migrate_<ts>`), then promotes the stage; on verification
-failure the original is left untouched. Start with a small symbol like
-`URNMUSDT`:
+in both), stages + verifies the rewrite, backs up the original under
+`interval=<I>/_layout_migration_backup/<ts>/` (outside the parquet root, so audit
+/ discovery ignore it), then promotes the stage; on verification failure the
+original is left untouched. Start with a small symbol like `URNMUSDT`:
 
 ```bash
 # dry-run plan (writes nothing)

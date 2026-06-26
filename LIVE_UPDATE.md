@@ -99,9 +99,14 @@ docs/live_update/09_RUNBOOK.md
 - **Single-symbol layout migration（real）。** `--migrate-current-layout`
   （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
   canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證
-  （row_count / duplicate / open_time range / layout）→ 備份原 dir
-  （`__backup_migrate_<ts>`）→ rename stage 為正式 dir → final precheck。
-  **預設 dry-run**，加 `--execute` 才寫資料。只支援**明確 symbols**：
+  （row_count / duplicate / open_time range / layout）→ 備份原 dir → rename stage
+  為正式 dir → final precheck。stage / backup 放在 parquet root **之外**
+  （`interval=<I>/_layout_migration_stage/<ts>/` 與
+  `interval=<I>/_layout_migration_backup/<ts>/`），不污染 discovery / audit；
+  `discover_current_dataset_symbols` / `audit_current_partition_layout` 只認
+  `parquet/symbol=<SYMBOL>`，會忽略 migration stage/backup 及舊式
+  `symbol=<S>.__backup_migrate_<ts>`（既有真實舊 backup 不自動搬移，但也不會被當成
+  symbol）。**預設 dry-run**，加 `--execute` 才寫資料。只支援**明確 symbols**：
   `--symbols all`、未提供 symbols、`--interval all` 皆報錯。驗證失敗直接 abort，
   原資料不變。建議先用小型 symbol（如 `URNMUSDT`）測試再擴大。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是

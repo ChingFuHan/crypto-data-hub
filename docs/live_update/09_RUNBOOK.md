@@ -542,15 +542,25 @@ symbols、`--interval all` 皆報錯。
   --interval 1m --symbols URNMUSDT --migrate-current-layout --execute
 ```
 
-execute 流程：precheck → 讀全部 rows → 依 open_time 排序去重 → 寫 stage dir
-（`symbol=<S>.__stage_migrate_<ts>`，內部 year/month）→ 驗證（row_count_after ==
-unique_before、duplicate_after == 0、min/max open_time 不變、stage 無 year-only）
-→ 備份原 dir（`symbol=<S>.__backup_migrate_<ts>`）→ rename stage 為正式 dir →
-final precheck。驗證失敗直接 abort，原資料不變。
+execute 流程：precheck → 讀全部 rows → 依 open_time 排序去重 → 寫 stage dir →
+驗證（row_count_after == unique_before、duplicate_after == 0、min/max open_time
+不變、stage 無 year-only）→ 備份原 dir → rename stage 為正式 dir → final precheck。
+驗證失敗直接 abort，原資料不變。
+
+stage / backup 位置（在 parquet root **之外**，不污染 discovery / audit）：
+
+```text
+local_data/binance_um_klines_current/interval=<I>/_layout_migration_stage/<ts>/symbol=<S>/
+local_data/binance_um_klines_current/interval=<I>/_layout_migration_backup/<ts>/symbol=<S>/
+```
 
 注意：
 
-- migration 會留下 `__backup_migrate_<ts>` 備份 dir，不自動刪除（人工確認後再清）。
+- `discover_current_dataset_symbols` / `audit_current_partition_layout` 只認
+  `parquet/symbol=<SYMBOL>`，會忽略 `_layout_migration_stage` /
+  `_layout_migration_backup`，以及舊式 `parquet/symbol=<S>.__backup_migrate_<ts>` /
+  `__stage_migrate_<ts>`（既有真實舊 backup 不自動搬移，但不會再被掃成 symbol）。
+- migration 會留下 `_layout_migration_backup/<ts>/` 備份，不自動刪除（人工確認後再清）。
 - 建議先用小型 symbol（如 `URNMUSDT`）測試，再擴大到更大 symbol。
 - 第一階段只處理「指定 interval + 指定 symbols」；不支援全市場 / all 一次搬移。
 

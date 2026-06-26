@@ -243,11 +243,13 @@ execute 流程：
 1. 跑 precheck。
 2. 讀 current symbol dir 內所有 parquet rows。
 3. 依 open_time 排序去重（同一 open_time 保留最後一筆，記 duplicate_replaced_count）。
-4. 寫 stage dir：symbol=<S>.__stage_migrate_<ts>/year=<YYYY>/month=<MM>/part-000.parquet
+4. 寫 stage dir（在 parquet root 之外）：
+   interval=<I>/_layout_migration_stage/<ts>/symbol=<S>/year=<YYYY>/month=<MM>/part-000.parquet
 5. 驗證 stage：row_count_after == unique_before、duplicate_after == 0、
    min/max open_time 不變、stage 只有 year/month（無 year-only）。
-6. 備份原 dir：symbol=<S>.__backup_migrate_<ts>
-7. rename stage -> 正式 symbol dir。
+6. 備份原 dir（在 parquet root 之外）：
+   interval=<I>/_layout_migration_backup/<ts>/symbol=<S>/
+7. rename stage -> 正式 parquet/symbol=<S> dir。
 8. 對新 dir 做 final precheck 確認 canonical。
 ```
 
@@ -256,8 +258,31 @@ execute 流程：
 / `source_missing`）、`stage_path`、`backup_path`、`row_count_before/after`、
 `duplicate_*`、`min/max_open_time_*`、`written_partitions` 等。
 
-> migration 會留下 `__backup_migrate_<ts>` 備份 dir（不自動刪除）。建議先用小型
-> symbol（如 `URNMUSDT`）測試，再擴大。
+#### Backup / stage 位置（不污染 parquet root）
+
+stage 與 backup **不**放在 `interval=<I>/parquet/` 底下，而是放在 interval
+dataset 底下的獨立目錄：
+
+```text
+local_data/binance_um_klines_current/interval=<I>/_layout_migration_stage/<ts>/symbol=<S>/
+local_data/binance_um_klines_current/interval=<I>/_layout_migration_backup/<ts>/symbol=<S>/
+```
+
+`discover_current_dataset_symbols` / `audit_current_partition_layout` 只認
+`parquet/symbol=<SYMBOL>` 形式的正式 symbol dir，會**忽略**：
+
+```text
+_layout_migration_stage / _layout_migration_backup
+symbol=<S>.__stage_migrate_<ts>   （舊式，曾放在 parquet root）
+symbol=<S>.__backup_migrate_<ts>  （舊式，曾放在 parquet root）
+任何 symbol 名稱含 "." 的 dir
+```
+
+> 既有真實 local_data 若還有舊式 `parquet/symbol=<S>.__backup_migrate_<ts>`，本次
+> **不自動搬移**，但 audit / discovery 會忽略它，不再當成正式 symbol。
+>
+> migration 會留下 `_layout_migration_backup/<ts>/` 備份（不自動刪除）。建議先用
+> 小型 symbol（如 `URNMUSDT`）測試，再擴大。
 
 ---
 

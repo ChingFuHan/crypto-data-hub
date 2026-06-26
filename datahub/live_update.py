@@ -1209,6 +1209,33 @@ def ensure_current_symbols_from_seed(
 CURRENT_LAYOUT_OK = "ok"
 CURRENT_LAYOUT_MIXED = "mixed_layout_detected"
 
+# Layout-migration working directories. New stage/backup dirs live OUTSIDE the
+# parquet root (under interval=<I>/_layout_migration_{stage,backup}/<ts>/), so
+# discovery/audit never see them. These markers also defensively exclude legacy
+# in-parquet-root backups (e.g. symbol=URNMUSDT.__backup_migrate_<ts>) that may
+# already exist in real local_data.
+LAYOUT_MIGRATION_STAGE_DIR = "_layout_migration_stage"
+LAYOUT_MIGRATION_BACKUP_DIR = "_layout_migration_backup"
+_LAYOUT_MIGRATION_MARKERS = ("__stage_migrate", "__backup_migrate")
+
+
+def _canonical_current_symbol(entry: Path) -> str | None:
+    """Return the canonical SYMBOL for a current parquet dir entry, else None.
+
+    A canonical current symbol dir is exactly ``symbol=<SYMBOL>`` where SYMBOL has
+    no ``.`` and no migration marker. This rejects migration stage/backup dirs
+    (e.g. ``symbol=URNMUSDT.__backup_migrate_<ts>``) so they are never mistaken
+    for a real symbol.
+    """
+    if not entry.is_dir() or not entry.name.startswith("symbol="):
+        return None
+    symbol = entry.name[len("symbol="):]
+    if not symbol or "." in symbol:
+        return None
+    if any(marker in symbol for marker in _LAYOUT_MIGRATION_MARKERS):
+        return None
+    return symbol.upper()
+
 
 def _symbol_partition_files(symbol_root: Path) -> list[tuple[Path, bool]]:
     """Return ``(parquet_path, has_month)`` for each parquet under a symbol dir.
@@ -1596,9 +1623,14 @@ def migrate_current_symbol_layout(
         return result
 
     # --- execute ---
+    # Stage and backup live OUTSIDE the parquet root (under the interval root) so
+    # discovery/audit never mistake them for a symbol.
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    stage = source.parent / f"symbol={normalized}.__stage_migrate_{stamp}"
-    backup = source.parent / f"symbol={normalized}.__backup_migrate_{stamp}"
+    interval_root = resolver.current_interval_root(interval)
+    stage_base = interval_root / LAYOUT_MIGRATION_STAGE_DIR / stamp
+    backup_base = interval_root / LAYOUT_MIGRATION_BACKUP_DIR / stamp
+    stage = stage_base / f"symbol={normalized}"
+    backup = backup_base / f"symbol={normalized}"
     result["stage_path"] = str(stage)
     result["backup_path"] = str(backup)
     if stage.exists():
@@ -1653,9 +1685,10 @@ def migrate_current_symbol_layout(
         if problems:
             warnings.extend(problems)
             result["status"] = MIGRATE_VERIFICATION_FAILED
-            shutil.rmtree(stage, ignore_errors=True)
+            shutil.rmtree(stage_base, ignore_errors=True)
             return result  # original untouched
 
+        backup.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, backup)
         try:
             os.replace(stage, source)
@@ -1664,10 +1697,11 @@ def migrate_current_symbol_layout(
             if not source.exists() and backup.exists():
                 os.replace(backup, source)
             raise
+        shutil.rmtree(stage_base, ignore_errors=True)
     except BaseException as exc:
         warnings.append(f"migration error: {exc}")
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
+        if stage_base.exists():
+            shutil.rmtree(stage_base, ignore_errors=True)
         result["status"] = MIGRATE_VERIFICATION_FAILED
         return result
 
@@ -3494,9 +3528,7 @@ def discover_current_dataset_symbols(
         return []
     symbols: list[str] = []
     for entry in sorted(symbol_root.iterdir()):
-        if not entry.is_dir() or not entry.name.startswith("symbol="):
-            continue
-        symbol = entry.name[len("symbol="):].upper()
+        symbol = _canonical_current_symbol(entry)
         if symbol:
             symbols.append(symbol)
     return symbols

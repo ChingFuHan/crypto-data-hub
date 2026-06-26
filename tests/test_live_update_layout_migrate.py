@@ -177,6 +177,71 @@ class MigrateHelperTests(unittest.TestCase):
 
 
 @unittest.skipIf(pq is None, "pyarrow required")
+class MigrateBackupLocationTests(unittest.TestCase):
+    def _make_legacy_dir(self, paths, name):
+        # A legacy in-parquet-root working dir, e.g.
+        # symbol=OLD.__backup_migrate_<ts> / symbol=OLD.__stage_migrate_<ts>.
+        d = paths.current_parquet_root("1m") / name / "year=2021"
+        d.mkdir(parents=True, exist_ok=True)
+
+    def test_backup_not_in_parquet_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            write_year_only(paths.current_parquet_root("1m"), "URNMUSDT", [make_record(BASE_OT)])
+            result = lu.migrate_current_symbol_layout(
+                "1m", "URNMUSDT", paths, execute=True, stamp="TS"
+            )
+            self.assertEqual(result["status"], lu.MIGRATE_DONE)
+            backup = Path(result["backup_path"])
+            self.assertTrue(backup.exists())
+            # Backup is NOT under the parquet root.
+            parquet_root = paths.current_parquet_root("1m").resolve()
+            self.assertNotIn(parquet_root, backup.resolve().parents)
+            self.assertIn(lu.LAYOUT_MIGRATION_BACKUP_DIR, result["backup_path"])
+            self.assertIn(lu.LAYOUT_MIGRATION_STAGE_DIR, result["stage_path"])
+
+    def test_audit_and_discovery_ignore_new_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            write_year_only(paths.current_parquet_root("1m"), "URNMUSDT", [make_record(BASE_OT)])
+            lu.migrate_current_symbol_layout("1m", "URNMUSDT", paths, execute=True, stamp="TS")
+            self.assertEqual(
+                lu.discover_current_dataset_symbols("1m", paths), ["URNMUSDT"]
+            )
+            self.assertEqual(
+                lu.audit_current_partition_layout("1m", [], paths)["symbols"], ["URNMUSDT"]
+            )
+
+    def test_legacy_in_parquet_root_backup_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = make_paths(tmp)
+            write_year_only(paths.current_parquet_root("1m"), "URNMUSDT", [make_record(BASE_OT)])
+            self._make_legacy_dir(paths, "symbol=URNMUSDT.__backup_migrate_20260626T195641Z")
+            self._make_legacy_dir(paths, "symbol=URNMUSDT.__stage_migrate_20260626T195641Z")
+            self.assertEqual(
+                lu.discover_current_dataset_symbols("1m", paths), ["URNMUSDT"]
+            )
+            audit = lu.audit_current_partition_layout("1m", [], paths)
+            self.assertEqual(audit["symbols"], ["URNMUSDT"])
+            self.assertNotIn(
+                "URNMUSDT.__BACKUP_MIGRATE_20260626T195641Z", audit["symbols"]
+            )
+
+    def test_canonical_symbol_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ok = root / "symbol=ETHUSDT"
+            ok.mkdir()
+            legacy = root / "symbol=ETHUSDT.__backup_migrate_TS"
+            legacy.mkdir()
+            stage = root / "symbol=ETHUSDT.__stage_migrate_TS"
+            stage.mkdir()
+            self.assertEqual(lu._canonical_current_symbol(ok), "ETHUSDT")
+            self.assertIsNone(lu._canonical_current_symbol(legacy))
+            self.assertIsNone(lu._canonical_current_symbol(stage))
+
+
+@unittest.skipIf(pq is None, "pyarrow required")
 class MigrateCliTests(unittest.TestCase):
     def _run(self, tmp, extra):
         return subprocess.run(
