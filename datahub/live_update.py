@@ -1469,6 +1469,215 @@ def build_current_layout_migration_precheck(
     }
 
 
+# Single-symbol layout migration statuses.
+MIGRATE_SOURCE_MISSING = "source_missing"
+MIGRATE_PLANNED = "planned"
+MIGRATE_DONE = "migrated"
+MIGRATE_VERIFICATION_FAILED = "verification_failed"
+
+
+def _write_records_year_month(records: list["KlineRecord"], symbol_dir: Path) -> list[str]:
+    """Write records into ``symbol_dir`` using canonical ``year/month`` layout.
+
+    ``symbol_dir`` is the directory whose name is ``symbol=<SYMBOL>`` (or a stage
+    dir standing in for it). Returns the written ``year=YYYY/month=MM`` partition
+    labels. Caller owns dedup/ordering.
+    """
+    require_pyarrow()
+    by_part: dict[tuple[int, int], list[KlineRecord]] = {}
+    for rec in records:
+        by_part.setdefault((rec.year, rec.month), []).append(rec)
+    written: list[str] = []
+    for year, month in sorted(by_part):
+        rows = [
+            rec.physical_dict()
+            for rec in sorted(by_part[(year, month)], key=lambda r: r.open_time)
+        ]
+        target = symbol_dir / f"year={year}" / f"month={month:02d}" / "part-000.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        table = _table_from_physical_rows(rows)
+        tmp = target.with_name(target.name + ".tmp")
+        pq.write_table(table, tmp)
+        os.replace(tmp, target)
+        written.append(f"year={year}/month={month:02d}")
+    return written
+
+
+def migrate_current_symbol_layout(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    execute: bool = False,
+    stamp: str | None = None,
+) -> dict[str, Any]:
+    """Migrate one current symbol to canonical year/month layout.
+
+    Reads every parquet under the current symbol dir (year-only / year/month /
+    mixed), merges + sorts + de-duplicates by ``open_time``, and rewrites the
+    canonical year/month layout. ``execute=False`` (default) is a dry-run that
+    writes nothing and returns the plan. ``execute=True`` stages the rewrite,
+    verifies row count / duplicate / open_time range / layout, backs up the
+    original symbol dir, then atomically promotes the stage. On verification
+    failure the original is left untouched.
+    """
+    validate_interval(interval)
+    require_pyarrow()
+    resolver = paths or LiveUpdatePaths()
+    normalized = symbol.upper()
+    if normalized == ALL_SYMBOLS_TOKEN.upper():
+        raise LiveUpdateCommandError(
+            "'all' is not a concrete symbol for layout migration"
+        )
+
+    source = resolver.current_parquet_root(interval) / f"symbol={normalized}"
+    precheck = precheck_symbol_layout_migration(interval, normalized, resolver)
+    expected = precheck["expected_canonical_partitions"]
+    expected_count = precheck["expected_canonical_partition_count"]
+    row_before = precheck["row_count"]
+    dup_before = precheck["duplicate_open_time_count"]
+    min_before = precheck["min_open_time"]
+    max_before = precheck["max_open_time"]
+    unique_before = row_before - dup_before
+    warnings: list[str] = []
+
+    result: dict[str, Any] = {
+        "status": None,
+        "dry_run": not execute,
+        "execute": bool(execute),
+        "interval": interval,
+        "symbol": normalized,
+        "source_path": str(source),
+        "stage_path": None,
+        "backup_path": None,
+        "row_count_before": row_before,
+        "row_count_after": None,
+        "duplicate_open_time_before": dup_before,
+        "duplicate_replaced_count": None,
+        "duplicate_open_time_after": None,
+        "min_open_time_before": min_before,
+        "max_open_time_before": max_before,
+        "min_open_time_after": None,
+        "max_open_time_after": None,
+        "expected_canonical_partition_count": expected_count,
+        "written_partition_count": None,
+        "written_partitions": [],
+        "warnings": warnings,
+    }
+
+    if not source.exists() or row_before == 0:
+        result["status"] = MIGRATE_SOURCE_MISSING
+        warnings.append("current symbol dir is missing or empty")
+        return result
+
+    migration_needed = (
+        precheck["status"] != CURRENT_LAYOUT_MIGRATION_NONE or dup_before > 0
+    )
+    if not migration_needed:
+        result["status"] = CURRENT_LAYOUT_MIGRATION_NONE
+        result["row_count_after"] = row_before
+        result["duplicate_replaced_count"] = 0
+        result["duplicate_open_time_after"] = 0
+        result["min_open_time_after"] = min_before
+        result["max_open_time_after"] = max_before
+        result["written_partition_count"] = precheck["year_month_file_count"]
+        result["written_partitions"] = [p["partition"] for p in expected]
+        return result
+
+    if not execute:
+        result["status"] = MIGRATE_PLANNED
+        result["row_count_after"] = unique_before
+        result["duplicate_replaced_count"] = dup_before
+        result["duplicate_open_time_after"] = 0
+        result["min_open_time_after"] = min_before
+        result["max_open_time_after"] = max_before
+        result["written_partition_count"] = expected_count
+        result["written_partitions"] = [p["partition"] for p in expected]
+        return result
+
+    # --- execute ---
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stage = source.parent / f"symbol={normalized}.__stage_migrate_{stamp}"
+    backup = source.parent / f"symbol={normalized}.__backup_migrate_{stamp}"
+    result["stage_path"] = str(stage)
+    result["backup_path"] = str(backup)
+    if stage.exists():
+        shutil.rmtree(stage)
+
+    try:
+        records = _seed_symbol_records(interval, normalized, source)
+        ordered = sorted(records, key=lambda r: r.open_time)
+        dedup: dict[int, KlineRecord] = {}
+        for rec in ordered:
+            dedup[rec.open_time] = rec  # last wins after sort
+        final_records = [dedup[key] for key in sorted(dedup)]
+        duplicate_replaced = len(ordered) - len(final_records)
+
+        stage.mkdir(parents=True, exist_ok=True)
+        written = _write_records_year_month(final_records, stage)
+
+        stage_open_times: list[int] = []
+        stage_year_only = 0
+        for path, has_month in _symbol_partition_files(stage):
+            stage_open_times.extend(_read_open_times(path))
+            if not has_month:
+                stage_year_only += 1
+        stage_unique = sorted(set(stage_open_times))
+        row_after = len(stage_open_times)
+        dup_after = row_after - len(stage_unique)
+        min_after = stage_unique[0] if stage_unique else None
+        max_after = stage_unique[-1] if stage_unique else None
+
+        result["row_count_after"] = row_after
+        result["duplicate_replaced_count"] = duplicate_replaced
+        result["duplicate_open_time_after"] = dup_after
+        result["min_open_time_after"] = min_after
+        result["max_open_time_after"] = max_after
+        result["written_partition_count"] = len(written)
+        result["written_partitions"] = written
+
+        problems: list[str] = []
+        if row_after != unique_before:
+            problems.append(
+                f"row_count_after {row_after} != unique_before {unique_before}"
+            )
+        if dup_after != 0:
+            problems.append(f"duplicate_open_time_after {dup_after} != 0")
+        if min_after != min_before:
+            problems.append("min_open_time mismatch after migration")
+        if max_after != max_before:
+            problems.append("max_open_time mismatch after migration")
+        if stage_year_only > 0:
+            problems.append("stage contains year-only parquet")
+
+        if problems:
+            warnings.extend(problems)
+            result["status"] = MIGRATE_VERIFICATION_FAILED
+            shutil.rmtree(stage, ignore_errors=True)
+            return result  # original untouched
+
+        os.replace(source, backup)
+        try:
+            os.replace(stage, source)
+        except BaseException:
+            # Promote failed after backup: restore the original from backup.
+            if not source.exists() and backup.exists():
+                os.replace(backup, source)
+            raise
+    except BaseException as exc:
+        warnings.append(f"migration error: {exc}")
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        result["status"] = MIGRATE_VERIFICATION_FAILED
+        return result
+
+    final = precheck_symbol_layout_migration(interval, normalized, resolver)
+    if final["status"] != CURRENT_LAYOUT_MIGRATION_NONE:
+        warnings.append(f"post-migration layout still {final['status']}")
+    result["status"] = MIGRATE_DONE
+    return result
+
+
 def _current_parquet_schema():
     require_pyarrow()
     return pa.schema(
@@ -3699,6 +3908,20 @@ def build_parser() -> argparse.ArgumentParser:
             "writes nothing and never contacts Binance"
         ),
     )
+    parser.add_argument(
+        "--migrate-current-layout",
+        action="store_true",
+        help=(
+            "migrate explicit --symbols to canonical year/month layout; dry-run "
+            "unless --execute is also given. Requires a single concrete --interval "
+            "and explicit symbols ('all' not allowed)"
+        ),
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="with --migrate-current-layout, actually write/replace data (not dry-run)",
+    )
     return parser
 
 
@@ -4014,6 +4237,40 @@ def run(args: argparse.Namespace) -> int:
             ),
         }
         print(pretty_json(payload_plan), end="")
+        return 0
+
+    if args.migrate_current_layout:
+        # Single-symbol layout migration. Requires a single concrete interval and
+        # explicit symbols; 'all' and --interval all are rejected. Dry-run unless
+        # --execute is given; symbol resolution is local (never Binance).
+        if args.interval == "all":
+            raise LiveUpdateCommandError(
+                "--migrate-current-layout requires a single concrete --interval "
+                "(not --interval all)"
+            )
+        migrate_symbols = parse_symbols_arg(args.symbols)
+        if not migrate_symbols or migrate_symbols == [ALL_SYMBOLS_TOKEN]:
+            raise LiveUpdateCommandError(
+                "--migrate-current-layout requires explicit --symbols "
+                "(e.g. URNMUSDT); '--symbols all' is not allowed"
+            )
+        migrate_results = [
+            migrate_current_symbol_layout(
+                args.interval, symbol, paths, execute=args.execute
+            )
+            for symbol in migrate_symbols
+        ]
+        payload_migrate = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "interval": args.interval,
+            "execute": bool(args.execute),
+            "dry_run": not args.execute,
+            "canonical_layout": "symbol=<SYMBOL>/year=<YYYY>/month=<MM>/part-000.parquet",
+            "results": migrate_results,
+        }
+        print(pretty_json(payload_migrate), end="")
         return 0
 
     # All other commands require symbol resolution

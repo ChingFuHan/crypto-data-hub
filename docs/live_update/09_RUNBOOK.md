@@ -523,10 +523,36 @@ recommended_action
   dry-run migration precheck。兩者皆只讀檔案，不寫 parquet / jsonl / state，不移動
   / 不刪除 / 不覆蓋資料，不自動 migration，**不打 Binance / exchangeInfo**。
 - 此模式的 `all` 是本地 current dataset discovery，不是交易所全市場。
-- mixed layout 實際 migration 須**另行執行**，並先驗證 row-count / duplicate /
-  continuity 才能替換 symbol dir。本次不提供真正 migration command。
 - precheck 讀 parquet `open_time` 欄位；1m 全市場（上千檔）可能較慢，建議先指定
   symbols 小範圍跑。
+
+### Single-symbol migration（real，dry-run by default）
+
+`--migrate-current-layout` 真正把指定 symbol 轉成 canonical year/month。預設
+dry-run，加 `--execute` 才寫資料。只支援明確 symbols；`--symbols all`、未提供
+symbols、`--interval all` 皆報錯。
+
+```bash
+# dry-run（不寫資料）
+.venv/bin/python scripts/live_update.py \
+  --interval 1m --symbols URNMUSDT --migrate-current-layout
+
+# 實際執行
+.venv/bin/python scripts/live_update.py \
+  --interval 1m --symbols URNMUSDT --migrate-current-layout --execute
+```
+
+execute 流程：precheck → 讀全部 rows → 依 open_time 排序去重 → 寫 stage dir
+（`symbol=<S>.__stage_migrate_<ts>`，內部 year/month）→ 驗證（row_count_after ==
+unique_before、duplicate_after == 0、min/max open_time 不變、stage 無 year-only）
+→ 備份原 dir（`symbol=<S>.__backup_migrate_<ts>`）→ rename stage 為正式 dir →
+final precheck。驗證失敗直接 abort，原資料不變。
+
+注意：
+
+- migration 會留下 `__backup_migrate_<ts>` 備份 dir，不自動刪除（人工確認後再清）。
+- 建議先用小型 symbol（如 `URNMUSDT`）測試，再擴大到更大 symbol。
+- 第一階段只處理「指定 interval + 指定 symbols」；不支援全市場 / all 一次搬移。
 
 ---
 

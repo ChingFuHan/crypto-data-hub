@@ -213,12 +213,51 @@ recommended_action
 （或 `--symbols all`）時，掃描**本地 current dataset**（local discovery），不是
 交易所全市場。
 
-> mixed layout migration 必須**另行執行**，且需 row-count / duplicate /
-> continuity 驗證後才可替換 symbol dir。本次只提供 audit 與 dry-run precheck，
-> **不會**自動搬移既有 current 舊資料。
->
 > ⚠️ precheck 會讀 parquet 的 `open_time` 欄位計算統計；1m 全市場（上千檔）可能
 > 較慢。建議先小範圍（指定 symbols）跑。
+
+#### Single-symbol migration（real，dry-run by default）
+
+`--migrate-current-layout` 真正把指定 symbol 從 year-only / mixed layout 轉成
+canonical year/month。**預設 dry-run**（只輸出計畫，不寫資料），加 `--execute`
+才會真的寫 / 替換。
+
+```bash
+# dry-run（不寫資料）
+.venv/bin/python scripts/live_update.py \
+  --interval 1m --symbols URNMUSDT --migrate-current-layout
+
+# 實際執行
+.venv/bin/python scripts/live_update.py \
+  --interval 1m --symbols URNMUSDT --migrate-current-layout --execute
+```
+
+限制：
+
+- 只支援**明確 symbols**；`--symbols all`、未提供 symbols、`--interval all` 皆報錯。
+- 第一階段只處理「指定 interval + 指定 symbols」。
+
+execute 流程：
+
+```text
+1. 跑 precheck。
+2. 讀 current symbol dir 內所有 parquet rows。
+3. 依 open_time 排序去重（同一 open_time 保留最後一筆，記 duplicate_replaced_count）。
+4. 寫 stage dir：symbol=<S>.__stage_migrate_<ts>/year=<YYYY>/month=<MM>/part-000.parquet
+5. 驗證 stage：row_count_after == unique_before、duplicate_after == 0、
+   min/max open_time 不變、stage 只有 year/month（無 year-only）。
+6. 備份原 dir：symbol=<S>.__backup_migrate_<ts>
+7. rename stage -> 正式 symbol dir。
+8. 對新 dir 做 final precheck 確認 canonical。
+```
+
+驗證失敗時直接 abort，**原資料保持不變**（不備份、不替換）。result dict 含
+`status`（`planned` / `migrated` / `verification_failed` / `no_migration_needed`
+/ `source_missing`）、`stage_path`、`backup_path`、`row_count_before/after`、
+`duplicate_*`、`min/max_open_time_*`、`written_partitions` 等。
+
+> migration 會留下 `__backup_migrate_<ts>` 備份 dir（不自動刪除）。建議先用小型
+> symbol（如 `URNMUSDT`）測試，再擴大。
 
 ---
 

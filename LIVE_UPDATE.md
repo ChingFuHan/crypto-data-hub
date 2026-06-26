@@ -96,6 +96,14 @@ docs/live_update/09_RUNBOOK.md
   **不**移動 / **不**刪除 / **不**覆蓋資料、**不**打 Binance。未提供 `--symbols`
   （或 `--symbols all`）時掃描**本地 current dataset**，非交易所全市場。mixed
   layout 實際 migration 須另行執行並做 row-count / duplicate / continuity 驗證。
+- **Single-symbol layout migration（real）。** `--migrate-current-layout`
+  （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
+  canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證
+  （row_count / duplicate / open_time range / layout）→ 備份原 dir
+  （`__backup_migrate_<ts>`）→ rename stage 為正式 dir → final precheck。
+  **預設 dry-run**，加 `--execute` 才寫資料。只支援**明確 symbols**：
+  `--symbols all`、未提供 symbols、`--interval all` 皆報錯。驗證失敗直接 abort，
+  原資料不變。建議先用小型 symbol（如 `URNMUSDT`）測試再擴大。
 - **Production long-running orchestration hardening pending。** Phase 1~8 是
   MVP primitives 與可測試 CLI skeleton，**不是** production-ready 長駐
   daemon。orchestration、retention manager、長時間全市場 all-interval 部署

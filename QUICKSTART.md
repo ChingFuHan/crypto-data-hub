@@ -279,6 +279,24 @@ Neither command migrates data. Actual mixed-layout migration must be run
 separately and verified by row count / duplicates / continuity. (1m full-market
 precheck reads many parquet files and can be slow — scope it with `--symbols`.)
 
+To actually migrate one symbol to canonical year/month, use
+`--migrate-current-layout` (dry-run by default; add `--execute` to write). It
+requires explicit `--symbols` and a single concrete `--interval` (`all` rejected
+in both), stages + verifies the rewrite, backs up the original
+(`symbol=<S>.__backup_migrate_<ts>`), then promotes the stage; on verification
+failure the original is left untouched. Start with a small symbol like
+`URNMUSDT`:
+
+```bash
+# dry-run plan (writes nothing)
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols URNMUSDT --migrate-current-layout
+
+# execute (writes + replaces; leaves a __backup_migrate_<ts> dir)
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols URNMUSDT --migrate-current-layout --execute
+```
+
 What gets written (all git-ignored):
 
 - Current dataset: `local_data/binance_um_klines_current/interval=1m/parquet/`
