@@ -390,20 +390,37 @@ webhook_enabled
   --once
 ```
 
-行為：
+`--once` = **run one complete live update cycle and exit**。
+
+行為（與 `--run-startup-backfill-once` 共用同一核心流程）：
 
 ```text
-1. 展開 intervals。
-2. 載入 symbols。
-3. 初始化 current dataset。
-4. 執行 startup backfill。
-5. 若 startup backfill 無缺口，抓最近 lookback_bars。
-6. enqueue 已收盤 KBar。
-7. forced flush all partition queues。
-8. flush 成功後更新 state。
-9. 執行 continuity check if enabled。
-10. 結束程式。
+1. 展開 intervals（all 僅 CLI 展開，不傳給 Binance API）。
+2. resolve 明確 symbols / --symbols all；未提供 --symbols 直接 fail。
+3. ensure current symbols from seed（partial current symbol missing 修復）。
+4. run startup backfill / REST gap repair once：
+   - 寫 closed_buffer
+   - merge 進 current parquet
+   - merge 成功後才更新 state
+5. seed 缺 -> bootstrap_required（不 REST、不從 0 建歷史、不寫 fake current）。
+6. 執行 continuity check if enabled。
+7. 結束程式。
 ```
+
+輸出為 machine-readable JSON（`once_update`）：`mode`、`requested_interval`、
+`active_intervals`、`symbols`、`results`（每個含 `status`、`fetched_row_count`、
+`merged_row_count`、`warnings` 等）。
+
+### `--once` vs `--run-startup-backfill-once`
+
+```text
+--once                       user-facing shorthand：一次完整 live update cycle 後結束
+--run-startup-backfill-once  明確的 startup backfill one-shot 模式
+```
+
+兩者目前共用同一核心 one-shot update flow，結果主線一致。`--once` 是給一般使用者
+的直覺入口（「跑一次補到最新就結束」），`--run-startup-backfill-once` 名稱明確指向
+startup backfill 階段。
 
 用途：
 

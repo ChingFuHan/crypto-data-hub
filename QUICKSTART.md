@@ -186,9 +186,18 @@ before any commit).
 # 4. check data continuity on the current dataset (no long-running daemon):
 .venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --check-continuity
 
-# 5. run one update cycle (startup backfill + recent bars + forced flush), then exit:
+# 5. run one complete live update cycle (ensure current symbols from seed +
+#    backfill/REST gap repair, merge to current parquet, update state), then exit:
 .venv/bin/python scripts/live_update.py --interval 1m --symbols BTCUSDT ETHUSDT --once
 ```
+
+`--once` = **run one complete live update cycle and exit** — it catches up to the
+latest closed bars (writing closed_buffer, merging into current parquet, updating
+state only after a successful merge) and emits a machine-readable `once_update`
+JSON. It shares the same core flow as `--run-startup-backfill-once`; `--once` is
+the user-facing shorthand, `--run-startup-backfill-once` is the explicit
+startup-backfill one-shot mode. Both require `--symbols`; a seed-missing symbol
+stays `bootstrap_required` (no REST, no zero-history rebuild).
 
 `--symbols` accepts these equivalent small-scope forms:
 

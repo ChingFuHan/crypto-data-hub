@@ -60,7 +60,12 @@
 
 ---
 
-## 5. 測試一次更新
+## 5. 測試一次更新（one-shot cycle）
+
+`--once` = run one complete live update cycle and exit：resolve symbols（必填）、
+ensure current symbols from seed、跑一次 startup / REST gap repair（寫
+closed_buffer、merge 進 current parquet、merge 成功後才更新 state），補到 latest
+closed KBar 後結束。輸出 `once_update` JSON。
 
 ```bash
 .venv/bin/python scripts/live_update.py \
@@ -68,6 +73,11 @@
   --symbols BTCUSDT ETHUSDT \
   --once
 ```
+
+與 `--run-startup-backfill-once` 共用同一核心流程；`--once` 是 user-facing
+shorthand，`--run-startup-backfill-once` 是明確的 startup backfill one-shot 模式
+（見第 20b 節）。未提供 `--symbols` 會明確 fail，不會默默全市場。seed 缺時回
+bootstrap_required，不從 0 建歷史。
 
 ---
 

@@ -46,6 +46,14 @@ docs/live_update/09_RUNBOOK.md
   `--check-continuity`、`--describe-layout`、`--describe-websocket-connections`、
   `--describe-webhook-server` 等模式。`all` 僅為 CLI 展開語意，絕不傳給
   Binance API。
+- **`--once` = one-shot live update cycle。** `--once` 代表 run one complete live
+  update cycle and exit：resolve symbols（必填）、ensure current symbols from
+  seed、跑一次 startup / REST gap repair（寫 closed_buffer、merge 進 current
+  parquet、merge 成功後才更新 state），補到 latest closed KBar 後結束，輸出
+  `once_update` JSON。與 `--run-startup-backfill-once` 共用同一核心流程；`--once`
+  是 user-facing shorthand，`--run-startup-backfill-once` 是明確的 startup
+  backfill one-shot 模式。未提供 `--symbols` 會明確 fail；seed 缺回
+  bootstrap_required，不從 0 建歷史。
 - **`--symbols` parsing。** 支援以下等價小範圍寫法：
   `--symbols BTCUSDT ETHUSDT`、`--symbols "BTCUSDT ETHUSDT"`、
   `--symbols BTCUSDT,ETHUSDT`。symbols 會 normalize 成大寫並去重。

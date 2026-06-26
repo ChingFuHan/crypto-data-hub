@@ -3348,14 +3348,18 @@ def run_once_mode(
     paths: LiveUpdatePaths,
     now_ms: int,
 ) -> int:
-    print("1. expand intervals")
-    print("2. load symbols")
-    print("3. initialize current dataset")
-    ensure_current_datasets(intervals, paths)
+    """Run one complete live-update cycle and exit.
 
-    print("4. execute startup backfill")
+    ``--once`` is the user-facing shorthand for a one-shot update. It shares the
+    exact core flow as ``--run-startup-backfill-once``: ensure current symbols
+    from seed, run the startup / REST gap repair once (writing closed_buffer,
+    merging into current parquet, and updating state only after a successful
+    merge), then exit. Seed-missing symbols stay ``bootstrap_required`` -- no
+    REST and no zero-history rebuild.
+    """
+    results_backfill: list[RestBackfillResult] = []
     if not args.disable_startup_backfill:
-        run_startup_backfill_once(
+        results_backfill = run_startup_backfill_once(
             intervals,
             symbols,
             paths,
@@ -3369,10 +3373,18 @@ def run_once_mode(
             backoff_max_seconds=args.rest_backoff_max_seconds,
         )
 
-    print("5. [skeleton] if no gap, fetch lookback_bars")
-    print("6. [skeleton] enqueue closed KBar")
-    print("7. [skeleton] forced flush all partition queues")
-    print("8. [skeleton] flush successful, update state")
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "dataset_version": DATASET_VERSION,
+        "mode": "once",
+        "requested_interval": args.interval,
+        "active_intervals": list(intervals),
+        "symbols": symbols,
+        "startup_backfill_enabled": not args.disable_startup_backfill,
+        "results": [result.to_dict() for result in results_backfill],
+    }
+    print(pretty_json({"once_update": payload}), end="")
+
     if args.check_continuity:
         results = run_continuity_check(
             intervals,
@@ -3389,7 +3401,6 @@ def run_once_mode(
             now_ms=now_ms,
         )
         print(pretty_json({"continuity_check": payload_cc}), end="")
-    print("10. program exit")
     return 0
 
 
