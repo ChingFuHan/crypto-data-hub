@@ -216,6 +216,43 @@ recommended_action
 > ⚠️ precheck 會讀 parquet 的 `open_time` 欄位計算統計；1m 全市場（上千檔）可能
 > 較慢。建議先小範圍（指定 symbols）跑。
 
+#### Batch planner（候選清單，read-only）
+
+`--list-current-layout-migration-candidates` 列出下一批安全 migration 候選，
+**只讀本地 current dataset**，不執行 migration、不寫資料、不接 Binance。
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --list-current-layout-migration-candidates \
+  --limit 10 \
+  --max-row-count 300000
+```
+
+預設：只列 `year_only_needs_migration`、排除 mixed、排除 already canonical。
+
+排序（安全 / 便宜優先）：`duplicate_open_time_count == 0` 優先 → `row_count` 小
+優先 → `expected_canonical_partition_count` 小優先 → symbol 字母 tie-break。
+
+選項：`--limit N`、`--max-row-count N`、`--include-mixed`、
+`--status <migration_status>`、`--output-symbols-only`。
+
+直接接到 migration：
+
+```bash
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --list-current-layout-migration-candidates \
+  --limit 10 --max-row-count 300000 --output-symbols-only
+# -> AAOIUSDT ACUUSDT AMATUSDT ...
+
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols "AAOIUSDT ACUUSDT AMATUSDT" --migrate-current-layout --execute
+```
+
+> 建議每批用 `--limit 10` / `--max-row-count` 控制大小，分批 migrate、分批驗證。
+> `BTCUSDT` / `ETHUSDT` 等 mixed layout 預設排除，等 year-only migration 穩定後，
+> 再用 `--include-mixed` 或 `--status mixed_layout_needs_migration` 單獨處理。
+
 #### Single-symbol migration（real，dry-run by default）
 
 `--migrate-current-layout` 真正把指定 symbol 從 year-only / mixed layout 轉成

@@ -1496,6 +1496,93 @@ def build_current_layout_migration_precheck(
     }
 
 
+def _candidate_from_precheck(precheck: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": precheck["symbol"],
+        "interval": precheck["interval"],
+        "status": precheck["status"],
+        "row_count": precheck["row_count"],
+        "year_only_file_count": precheck["year_only_file_count"],
+        "year_month_file_count": precheck["year_month_file_count"],
+        "expected_canonical_partition_count": precheck[
+            "expected_canonical_partition_count"
+        ],
+        "duplicate_open_time_count": precheck["duplicate_open_time_count"],
+        "min_open_time": precheck["min_open_time"],
+        "max_open_time": precheck["max_open_time"],
+        "recommended_action": precheck["recommended_action"],
+    }
+
+
+def list_current_layout_migration_candidates(
+    interval: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    limit: int = 0,
+    max_row_count: int = 0,
+    include_mixed: bool = False,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Build a read-only, ranked candidate list for the next migration batch.
+
+    Scans the LOCAL current dataset (never Binance). Defaults to
+    ``year_only_needs_migration`` only, excludes mixed layout and
+    already-canonical symbols, and writes nothing. Ranking favors safe, cheap
+    migrations first: no duplicates, then small row_count, then few expected
+    partitions, with symbol as the final tie-break.
+    """
+    validate_interval(interval)
+    resolver = paths or LiveUpdatePaths()
+
+    if status is not None:
+        allowed = {status}
+    else:
+        allowed = {CURRENT_LAYOUT_MIGRATION_YEAR_ONLY}
+        if include_mixed:
+            allowed.add(CURRENT_LAYOUT_MIGRATION_MIXED)
+
+    precheck = build_current_layout_migration_precheck(interval, [], resolver)
+    candidates = [
+        _candidate_from_precheck(item)
+        for item in precheck["prechecks"]
+        if item["status"] in allowed
+        and item["status"] != CURRENT_LAYOUT_MIGRATION_NONE
+    ]
+    if max_row_count > 0:
+        candidates = [c for c in candidates if c["row_count"] <= max_row_count]
+
+    candidates.sort(
+        key=lambda c: (
+            1 if c["duplicate_open_time_count"] > 0 else 0,
+            c["row_count"],
+            c["expected_canonical_partition_count"],
+            c["symbol"],
+        )
+    )
+    total_matched = len(candidates)
+    if limit > 0:
+        candidates = candidates[:limit]
+
+    return {
+        "interval": interval,
+        "filters": {
+            "limit": limit,
+            "max_row_count": max_row_count,
+            "include_mixed": include_mixed,
+            "status": status,
+            "allowed_statuses": sorted(allowed),
+        },
+        "total_matched": total_matched,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "symbols": [c["symbol"] for c in candidates],
+        "note": (
+            "read-only planner; lists candidates only, never migrates, writes "
+            "nothing and never contacts Binance"
+        ),
+    }
+
+
 # Single-symbol layout migration statuses.
 MIGRATE_SOURCE_MISSING = "source_missing"
 MIGRATE_PLANNED = "planned"
@@ -3954,6 +4041,41 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --migrate-current-layout, actually write/replace data (not dry-run)",
     )
+    parser.add_argument(
+        "--list-current-layout-migration-candidates",
+        action="store_true",
+        help=(
+            "read-only ranked candidate list for the next layout-migration batch; "
+            "writes nothing and never contacts Binance"
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="max candidates to list (0 = no limit)",
+    )
+    parser.add_argument(
+        "--max-row-count",
+        type=int,
+        default=0,
+        help="exclude candidates whose row_count exceeds this (0 = no cap)",
+    )
+    parser.add_argument(
+        "--include-mixed",
+        action="store_true",
+        help="also include mixed-layout symbols in the candidate list",
+    )
+    parser.add_argument(
+        "--status",
+        default=None,
+        help="filter candidates to a single migration status",
+    )
+    parser.add_argument(
+        "--output-symbols-only",
+        action="store_true",
+        help="print only a space-separated symbol list (for --symbols)",
+    )
     return parser
 
 
@@ -4303,6 +4425,35 @@ def run(args: argparse.Namespace) -> int:
             "results": migrate_results,
         }
         print(pretty_json(payload_migrate), end="")
+        return 0
+
+    if args.list_current_layout_migration_candidates:
+        # Read-only batch planner: scans the LOCAL current dataset, never Binance,
+        # and writes nothing. Single concrete interval only.
+        if args.interval == "all":
+            raise LiveUpdateCommandError(
+                "--list-current-layout-migration-candidates requires a single "
+                "concrete --interval (not --interval all)"
+            )
+        plan = list_current_layout_migration_candidates(
+            args.interval,
+            paths,
+            limit=args.limit,
+            max_row_count=args.max_row_count,
+            include_mixed=args.include_mixed,
+            status=args.status,
+        )
+        if args.output_symbols_only:
+            print(" ".join(plan["symbols"]))
+            return 0
+        payload_candidates = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            "interval": args.interval,
+            **plan,
+        }
+        print(pretty_json(payload_candidates), end="")
         return 0
 
     # All other commands require symbol resolution

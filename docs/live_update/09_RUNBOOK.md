@@ -526,6 +526,41 @@ recommended_action
 - precheck 讀 parquet `open_time` 欄位；1m 全市場（上千檔）可能較慢，建議先指定
   symbols 小範圍跑。
 
+### Batch planner（候選清單，read-only）
+
+列出下一批安全 migration 候選（只讀本地 current dataset，不 migrate、不寫資料、
+不接 Binance）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --list-current-layout-migration-candidates \
+  --limit 10 \
+  --max-row-count 300000
+```
+
+預設只列 `year_only_needs_migration`，排除 mixed / canonical。排序：
+`duplicate_open_time_count == 0` 優先 → `row_count` 小 →
+`expected_canonical_partition_count` 小 → symbol。選項：`--limit`、
+`--max-row-count`、`--include-mixed`、`--status`、`--output-symbols-only`。
+
+接到 migration（先 dry-run 再 execute）：
+
+```bash
+SYMS=$(.venv/bin/python scripts/live_update.py --interval 1m \
+  --list-current-layout-migration-candidates --limit 10 --max-row-count 300000 \
+  --output-symbols-only)
+
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols "$SYMS" --migrate-current-layout            # dry-run
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --symbols "$SYMS" --migrate-current-layout --execute  # 實際執行
+```
+
+建議每批 `--limit 10` / `--max-row-count` 控制大小，分批 migrate / 驗證。
+`BTCUSDT` / `ETHUSDT` 等 mixed 預設排除，year-only migration 穩定後再用
+`--include-mixed` 處理。
+
 ### Single-symbol migration（real，dry-run by default）
 
 `--migrate-current-layout` 真正把指定 symbol 轉成 canonical year/month。預設

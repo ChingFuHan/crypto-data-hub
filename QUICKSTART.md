@@ -279,6 +279,25 @@ Neither command migrates data. Actual mixed-layout migration must be run
 separately and verified by row count / duplicates / continuity. (1m full-market
 precheck reads many parquet files and can be slow — scope it with `--symbols`.)
 
+To pick the next safe batch, use the read-only planner (writes nothing, no
+Binance, local current-dataset only). It defaults to `year_only_needs_migration`,
+excludes mixed/canonical, and ranks no-duplicates + small row_count first:
+
+```bash
+# JSON with ranked candidates
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --list-current-layout-migration-candidates --limit 10 --max-row-count 300000
+
+# just the symbols, ready to paste into --symbols
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --list-current-layout-migration-candidates --limit 10 --max-row-count 300000 \
+  --output-symbols-only
+```
+
+Keep batches small (`--limit 10` / `--max-row-count`), migrate, verify, repeat.
+`BTCUSDT` / `ETHUSDT` (mixed) are excluded by default — handle them later with
+`--include-mixed` once year-only migration is proven.
+
 To actually migrate one symbol to canonical year/month, use
 `--migrate-current-layout` (dry-run by default; add `--execute` to write). It
 requires explicit `--symbols` and a single concrete `--interval` (`all` rejected

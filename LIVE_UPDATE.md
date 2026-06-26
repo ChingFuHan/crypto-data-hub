@@ -96,6 +96,14 @@ docs/live_update/09_RUNBOOK.md
   **不**移動 / **不**刪除 / **不**覆蓋資料、**不**打 Binance。未提供 `--symbols`
   （或 `--symbols all`）時掃描**本地 current dataset**，非交易所全市場。mixed
   layout 實際 migration 須另行執行並做 row-count / duplicate / continuity 驗證。
+- **Layout migration batch planner（候選清單，read-only）。**
+  `--list-current-layout-migration-candidates`（`list_current_layout_migration_candidates`）
+  列出下一批安全 migration 候選：只讀本地 current dataset，不 migrate、不寫資料、
+  不接 Binance。預設只列 `year_only_needs_migration`、排除 mixed / canonical。排序：
+  `duplicate_open_time_count == 0` 優先 → `row_count` 小 → expected partitions 小 →
+  symbol。選項：`--limit`、`--max-row-count`、`--include-mixed`、`--status`、
+  `--output-symbols-only`（輸出可直接接 `--symbols`）。建議每批 `--limit 10` /
+  `--max-row-count` 控制大小；`BTCUSDT` / `ETHUSDT` mixed 先排除，year-only 穩定後再處理。
 - **Single-symbol layout migration（real）。** `--migrate-current-layout`
   （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
   canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證
