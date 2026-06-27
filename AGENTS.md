@@ -172,6 +172,29 @@ Full all-interval `local_data/` validation must follow
   default; they must not write to `local_data/live_update/` or the historical
   seed Parquet unless a task explicitly requires audit / debug / replay.
 
+### Primary universe (data scope)
+
+> **Data HUB is the source of truth.** Research agents **read-only mount** the
+> Data HUB; they must not write the current dataset, live-update runtime, or the
+> historical seed (except an explicit audit / debug / replay task).
+
+- **Primary research / trading universe** = Binance **USDⓈ-M Futures**,
+  `PERPETUAL`, `quote_asset = USDT`, **including delisted USDT perpetual
+  contracts** for historical research.
+- **Binance UM ≠ USDT pairs only.** USDⓈ-M Futures also lists USDC / BUSD quote
+  pairs and delivery / settled / special symbols. **Do not treat all Binance UM
+  symbols as the primary universe.**
+- **Excluded from normal migration / trading research flow:** `quote_asset !=
+  USDT`, USDC quote pairs (e.g. `KAITOUSDC`, `BTCUSDC`), BUSD quote pairs,
+  delivery contracts (e.g. `BTCUSDT_230630`), SETTLED symbols (e.g.
+  `CVXUSDTSETTLED`), non-ASCII symbols (e.g. `龙虾USDT`).
+- **Corrupt parquet is noted / quarantined, not auto-fixed or deleted.**
+  `KAITOUSDC` is a known quarantined symbol (USDC quote pair + unreadable source
+  parquet). Migration must not proceed past a source-parquet readability
+  failure.
+- Full definition: `DATA_CONTRACT.md` → *Primary Universe Policy*. Acceptance
+  checklist: `INIT_VERIFY.md`.
+
 ### Pending governance decisions (live update)
 
 - `market.binance.um.klines.current` — whether to register as a formal derived
@@ -239,7 +262,8 @@ Full all-interval `local_data/` validation must follow
 | `README.md` | Project overview and structure. |
 | `QUICKSTART.md` | Fast path to getting started. |
 | `VERSION` | Current semantic version (`v0.14.0`). |
-| `INIT.md` | New-machine / disaster-recovery entrypoint (rebuild + verify). |
+| `INIT.md` | New-machine / disaster-recovery entrypoint (3-layer init + rebuild). |
+| `INIT_VERIFY.md` | Mandatory post-init acceptance checklist (universe + git + migration). |
 | `LIVE_UPDATE.md` | Live-update task entrypoint (Phases 1–8 MVP primitives). |
 | `CHANGELOG.md` | Human-readable history of changes. |
 | `DATA_CONTRACT.md` | Dataset Contract Framework — schema + quality rules. |

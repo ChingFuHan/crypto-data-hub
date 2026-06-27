@@ -410,6 +410,67 @@ from the Binance Data Vision public archive and materialized by interval.
 
 ---
 
+## Primary Universe Policy (Binance USDⓈ-M Futures)
+
+> Authoritative definition of the project's **primary research / trading
+> universe**. The historical seed, current dataset, and live-update layers all
+> default to this universe. It governs which symbols flow through normal
+> ingestion, current-dataset initialization, layout migration, and live update.
+
+The **primary universe** is exactly:
+
+- **Venue:** Binance **USDⓈ-M Futures** (USD-M Futures).
+- **Contract type:** `PERPETUAL`.
+- **Quote asset:** `quote_asset = USDT`.
+- **History:** **include delisted USDT perpetual contracts** (needed for
+  historical research; the archive is authoritative for the full historical
+  USDT-perpetual symbol set).
+
+> **Critical clarification.** Binance UM / USDⓈ-M Futures is **not** the same as
+> "USDT pairs only". USDⓈ-M Futures also lists USDT, **USDC**, and **BUSD**
+> quote pairs, plus delivery / settled / special symbols. The venue is the
+> source; the primary universe is the `quote_asset = USDT` PERPETUAL subset of
+> it. Do **not** treat all Binance UM symbols as the primary universe.
+
+The following are **excluded** from the primary universe (not part of normal
+primary ingestion / migration / trading research flow):
+
+| Excluded | Examples |
+|----------|----------|
+| `quote_asset != USDT` | — |
+| USDC quote pairs | `KAITOUSDC`, `BTCUSDC`, `SOLUSDC`, `DOGEUSDC` |
+| BUSD quote pairs | `*BUSD` |
+| Delivery (dated) contracts | `BTCUSDT_230630` |
+| SETTLED symbols | `CVXUSDTSETTLED` |
+| Non-ASCII symbols | `龙虾USDT`, `币安人生USDT` |
+
+### Non-target data: inventory / quarantine, never delete
+
+Non-primary data may already exist under `local_data/` (e.g. a USDC pair copied
+into the current dataset before this policy, or a corrupt parquet). Such data is
+handled by an **inventory / quarantine plan**, never by direct deletion
+(`ROOT.md` → *Immutability of records*, *Fail loud*):
+
+- **Do not delete** non-target or corrupt data; record it (inventory) and mark
+  it quarantined.
+- **Do not auto-fix** corrupt parquet; note it and stop. Migration dry-run /
+  execute must not proceed past a source-parquet readability failure.
+- **Known quarantined symbol:** `KAITOUSDC` — a USDC quote pair (already
+  non-primary) whose current-dataset source parquet additionally fails the
+  parquet footer / magic-bytes read. Quarantined until a recovery policy
+  exists: do not re-run its migration, do not auto-fix, do not delete. See
+  `INIT_VERIFY.md` → *Source parquet readability warning*.
+
+### Relation to quality rule K8
+
+K8 (above) intentionally does **not** constrain Kline `symbol` to the current
+active universe, because the archive includes delisted symbols. This Primary
+Universe Policy is the complementary selection rule: the seed/archive may
+*contain* non-USDT and delisted symbols, but normal primary flow **selects**
+only `quote_asset = USDT` PERPETUAL (delisted USDT perpetual included).
+
+---
+
 ## Pending Governance Decisions — Live Update (v0.14.0)
 
 > **Not yet registered.** The live-update layer (Phases 1–8) introduces two

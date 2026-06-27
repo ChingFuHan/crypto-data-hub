@@ -309,11 +309,22 @@ batches:
 ```bash
 .venv/bin/python scripts/live_update.py --interval 1m \
   --plan-current-layout-migration-batches \
-  --batch-size 10 --max-row-count 300000 --max-batches 5 \
+  --batch-size 10 --max-row-count 300000 --max-batches 2 \
+  --quote-assets USDT \
   --exclude-delivery-contracts --exclude-settled --exclude-non-ascii \
-  --exclude-symbols BTCUSDT ETHUSDT \
+  --exclude-symbols BTCUSDT ETHUSDT KAITOUSDC \
   --dry-run-batches
 ```
+
+> **Primary universe = USDT quote perpetual.** Binance UM (USDⓈ-M Futures) is the
+> venue, not the universe: it also lists USDC / BUSD quote pairs and delivery /
+> SETTLED / non-ASCII symbols, which are **not** part of the primary universe.
+> `--quote-assets USDT` is the target flag but is **pending implementation**;
+> until then, manually exclude non-USDT quote symbols (USDC / BUSD) and add known
+> non-primary symbols via `--exclude-symbols` (e.g. `KAITOUSDC`). `KAITOUSDC` is
+> additionally a **quarantined** symbol (unreadable source parquet) — do not
+> re-run its migration, auto-fix, or delete it. See `DATA_CONTRACT.md` →
+> *Primary Universe Policy* and `INIT_VERIFY.md`.
 
 Defaults: only `year_only_needs_migration`, excludes mixed / canonical /
 source_missing, and excludes `BTCUSDT` / `ETHUSDT` by default (migrate those mixed

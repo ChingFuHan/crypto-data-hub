@@ -272,13 +272,25 @@ recommended_action
   --plan-current-layout-migration-batches \
   --batch-size 10 \
   --max-row-count 300000 \
-  --max-batches 5 \
+  --max-batches 2 \
+  --quote-assets USDT \
   --exclude-delivery-contracts \
   --exclude-settled \
   --exclude-non-ascii \
-  --exclude-symbols BTCUSDT ETHUSDT \
+  --exclude-symbols BTCUSDT ETHUSDT KAITOUSDC \
   --dry-run-batches
 ```
+
+> **Primary universe = USDT quote perpetual。** primary universe 是 Binance
+> USDⓈ-M Futures `PERPETUAL` `quote_asset = USDT`（含已下市 USDT 永續）。
+> Binance UM **不等於只有 USDT pairs**；USDC / BUSD quote pairs、delivery、
+> SETTLED、non-ASCII 都不屬於 primary universe。`--quote-assets USDT` 為目標旗標但
+> **尚未實作（Pending implementation）**；在實作前手動排除非 USDT quote symbols
+> （USDC / BUSD），並用 `--exclude-symbols` 補上已知非 primary symbols（如
+> `KAITOUSDC`）。`KAITOUSDC` 是 known quarantined symbol（USDC quote pair + corrupt
+> source parquet）：不重跑 migration、不自動修復、不刪除。migration 前 source
+> parquet readability precheck 失敗即停。見 `DATA_CONTRACT.md` →
+> *Primary Universe Policy* 與根目錄 `INIT_VERIFY.md`。
 
 選項：
 

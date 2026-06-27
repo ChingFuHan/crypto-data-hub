@@ -52,6 +52,16 @@
   `local_data/binance_um_klines_current/`; runtime buffers / state / latest /
   closed_buffer / rejects at `local_data/live_update/`. Both are git-ignored
   runtime data, never committed.
+- **Primary universe = Binance USDⓈ-M Futures, `PERPETUAL`, `quote_asset =
+  USDT`, including delisted USDT perpetuals.** Binance UM is the venue, **not**
+  the universe: USDⓈ-M Futures also lists USDC / BUSD quote pairs and delivery /
+  settled / special symbols, which are **excluded** from normal primary
+  ingestion / migration / trading research flow. Data HUB is the source of
+  truth; research agents **read-only mount** it. Non-target or corrupt data is
+  **inventoried / quarantined, never deleted or auto-fixed** — `KAITOUSDC` (USDC
+  quote pair + unreadable source parquet) is a known quarantined symbol. Full
+  definition: `DATA_CONTRACT.md` → *Primary Universe Policy*; acceptance
+  checklist: `INIT_VERIFY.md`.
 - **Live-update namespaces are NOT registered.**
   `market.binance.um.klines.current` (derived current dataset) and
   `market.binance.um.klines.live_update` (runtime operational namespace) are

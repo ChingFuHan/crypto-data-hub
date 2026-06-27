@@ -10,6 +10,14 @@ unified data infrastructure providing **Dataset**, **Metadata**, **Registry**,
 > [Live Update](#live-update-mvp-primitives) below.
 > **Version:** `v0.14.0` (see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)).
 
+> **Primary universe.** Binance UM (USDⓈ-M Futures) is the **venue**. The
+> project's **primary research / trading universe** is the `PERPETUAL`,
+> `quote_asset = USDT` subset (including delisted USDT perpetuals). Non-USDT
+> quote pairs (USDC / BUSD), delivery contracts, SETTLED, and non-ASCII symbols
+> may exist under `local_data/` but are **not** part of the primary universe.
+> See [`DATA_CONTRACT.md`](DATA_CONTRACT.md) → *Primary Universe Policy* and
+> [`INIT_VERIFY.md`](INIT_VERIFY.md).
+
 ---
 
 ## Core Design Principles

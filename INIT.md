@@ -2,7 +2,10 @@
 
 # crypto-data-hub 新機器初始化入口
 
-本檔案是本 repo 在新電腦、新 VM、或災難復原環境中的啟動入口。
+本檔案是本 repo 在新電腦、新 VM、災難復原、`local_data` rebuild，以及
+Live Update 初始化環境中的啟動入口。它**不只是 historical seed rebuild
+文件**：三層資料（historical seed / current dataset / live update runtime）的
+初始化與復原都從這裡導引。
 
 適用情境：
 
@@ -11,9 +14,15 @@
     local_data 不存在
     local_data 無法從舊機器搬移
     需要從 Binance public archive 重新建立 Binance USD-M Futures kline 資料
-    需要驗證重建後的 local_data 是否完整可用
+    需要初始化 current dataset / live update runtime
+    需要驗證重建後的 local_data 是否完整可用（見 INIT_VERIFY.md）
 
 本檔案只負責初始化導引。
+
+> **初始化後必須執行 `INIT_VERIFY.md`。** 任一機器初始化 / rebuild /
+> migration / live-update tooling 變更後，必須逐項通過 `INIT_VERIFY.md`
+> 驗收清單。`INIT_VERIFY.md` 有 critical failure 時：不得繼續 migration、
+> 不得 push、不得讓 research agent 使用該資料。
 
 真正的任務規格以以下兩份檔案為準：
 
@@ -54,7 +63,9 @@
 
     ROOT.md
     AGENTS.md / HANDOFF.md
+    DATA_CONTRACT.md（primary universe policy）
     INIT.md
+    INIT_VERIFY.md（初始化驗收清單）
     planning/tasks/task_rebuild_all_klines.md
     planning/tasks/task_rebuild_all_klines_verify.md
 
@@ -91,6 +102,101 @@ Repo 不保存：
     rebuild logs
 
 local_data 必須保持 untracked。
+
+---
+
+## 2b. 三層資料架構（Historical Seed / Current / Live Update Runtime）
+
+`local_data/` 內有三層資料，初始化與復原都要理解其角色：
+
+```text
+Layer 1: Historical Seed
+  local_data/binance_um_klines/interval=<INTERVAL>/parquet/
+
+Layer 2: Current Dataset
+  local_data/binance_um_klines_current/interval=<INTERVAL>/parquet/
+
+Layer 3: Live Update Runtime
+  local_data/live_update/binance_um_klines/interval=<INTERVAL>/
+```
+
+角色：
+
+- **Historical seed** 用於 bootstrap / rebuild / recovery，是 current dataset
+  與 live update 的來源；由 `task_rebuild_all_klines.md` 從 Binance public
+  archive 重建。
+- **Current dataset** 是 research / live_update merge 後的**主要讀取層**，
+  research agent 預設只讀這一層。canonical layout 為
+  `symbol=<S>/year=<YYYY>/month=<MM>/part-000.parquet`。
+- **Live update runtime** 包含 state / jsonl / closed_buffer /
+  data_quality_notes / latest / rejects 等運行時資料。**不進 git**
+  （git-ignored runtime data）。
+
+其他規則：
+
+- research agents 必須以 **read-only mount** 使用 Data HUB；不得寫入 current
+  dataset、live update runtime 或 historical seed（除非任務明確要求 audit /
+  debug / replay）。
+- Live Update 必須遵守 **primary universe policy**（見下一節）。
+- 三層資料皆在 `local_data/` 之下，**永不 commit**。
+
+---
+
+## 2c. Primary universe policy
+
+本專案真正的 primary research / trading universe：
+
+```text
+venue       = Binance USDⓈ-M Futures
+contract    = PERPETUAL
+quote_asset = USDT
+history     = include delisted USDT perpetual contracts（歷史研究用）
+```
+
+不屬於 primary universe（normal primary flow 排除）：
+
+```text
+quote_asset != USDT
+USDC quote pairs（KAITOUSDC、BTCUSDC、SOLUSDC、DOGEUSDC）
+BUSD quote pairs
+delivery contracts（BTCUSDT_230630）
+SETTLED symbols（CVXUSDTSETTLED）
+non-ASCII symbols（龙虾USDT、币安人生USDT）
+```
+
+> Binance UM / USDⓈ-M Futures **不等於只有 USDT pairs**；它也含 USDC / BUSD
+> quote pairs 與 delivery / settled / special symbols。**不要把所有 Binance UM
+> symbols 當成 primary universe。** 完整定義見 `DATA_CONTRACT.md` →
+> *Primary Universe Policy*。
+
+非 primary 資料若已存在於 `local_data/`，採 inventory / quarantine，
+**不得直接刪除、不得自動修復**。`KAITOUSDC` 是 known quarantined symbol
+（USDC quote pair + corrupt source parquet），詳見 `INIT_VERIFY.md`。
+
+### 標準 migration planner command
+
+current dataset layout migration 規劃使用標準命令（read-only，dry-run；
+`--quote-assets USDT` 為**目標旗標，pending implementation**）：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --plan-current-layout-migration-batches \
+  --batch-size 10 \
+  --max-row-count 300000 \
+  --max-batches 2 \
+  --quote-assets USDT \
+  --exclude-delivery-contracts \
+  --exclude-settled \
+  --exclude-non-ascii \
+  --exclude-symbols BTCUSDT ETHUSDT KAITOUSDC \
+  --dry-run-batches
+```
+
+> `--quote-assets USDT` 尚未實作（Pending implementation）。在實作前，暫時
+> workaround：手動排除非 USDT quote symbols（USDC / BUSD），並用
+> `--exclude-symbols` 補上已知非 primary symbols（如 `KAITOUSDC`）。其餘 exclude
+> 旗標已實作。migration 驗收見 `INIT_VERIFY.md` → *Migration planner verification*。
 
 ---
 

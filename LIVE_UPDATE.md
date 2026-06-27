@@ -120,6 +120,35 @@ docs/live_update/09_RUNBOOK.md
   不得與其他 current-layout / `--once` / `--run-startup-backfill-once` /
   `--initialize-current-dataset` 混用，亦不接受 `--symbols`、`--interval all`、invalid args
   （皆 fail fast）。
+- **Primary universe = USDT quote perpetual。** Live Update 與 migration 的
+  primary universe 是 Binance **USDⓈ-M Futures** `PERPETUAL` `quote_asset =
+  USDT`（含已下市的 USDT 永續）。Binance UM **不等於只有 USDT pairs**：USDC /
+  BUSD quote pairs、delivery（`BTCUSDT_230630`）、SETTLED、non-ASCII 都**不**屬於
+  primary universe，不進 normal migration / trading research flow。標準 planner
+  命令（read-only、dry-run；`--quote-assets USDT` 為**目標旗標，pending
+  implementation**）：
+
+  ```bash
+  .venv/bin/python scripts/live_update.py \
+    --interval 1m \
+    --plan-current-layout-migration-batches \
+    --batch-size 10 \
+    --max-row-count 300000 \
+    --max-batches 2 \
+    --quote-assets USDT \
+    --exclude-delivery-contracts \
+    --exclude-settled \
+    --exclude-non-ascii \
+    --exclude-symbols BTCUSDT ETHUSDT KAITOUSDC \
+    --dry-run-batches
+  ```
+
+  > `--quote-assets USDT` 尚未實作（Pending implementation）。在實作前手動排除
+  > 非 USDT quote symbols（USDC / BUSD），並用 `--exclude-symbols` 補上已知非
+  > primary symbols（如 `KAITOUSDC`）。`KAITOUSDC` 同時是 USDC quote pair 與
+  > corrupt source parquet，為 known quarantined symbol：不重跑 migration、
+  > 不自動修復、不刪除（見 `DATA_CONTRACT.md` → *Primary Universe Policy*、
+  > `INIT_VERIFY.md`）。
 - **Single-symbol layout migration（real）。** `--migrate-current-layout`
   （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
   canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證
