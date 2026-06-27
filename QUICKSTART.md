@@ -319,12 +319,16 @@ batches:
 > **Primary universe = USDT quote perpetual.** Binance UM (USDⓈ-M Futures) is the
 > venue, not the universe: it also lists USDC / BUSD quote pairs and delivery /
 > SETTLED / non-ASCII symbols, which are **not** part of the primary universe.
-> `--quote-assets USDT` is the target flag but is **pending implementation**;
-> until then, manually exclude non-USDT quote symbols (USDC / BUSD) and add known
-> non-primary symbols via `--exclude-symbols` (e.g. `KAITOUSDC`). `KAITOUSDC` is
-> additionally a **quarantined** symbol (unreadable source parquet) — do not
-> re-run its migration, auto-fix, or delete it. See `DATA_CONTRACT.md` →
-> *Primary Universe Policy* and `INIT_VERIFY.md`.
+> `--quote-assets USDT` is implemented and affects only batch planner candidate
+> filtering, not the live daemon, `--once`, or startup backfill. It supports
+> `--quote-assets USDT`, `--quote-assets USDT,USDC`, and quoted lists such as
+> `--quote-assets "USDT USDC"`; quote asset is detected by suffix (`USDT` /
+> `USDC` / `BUSD`). Delivery contracts still require
+> `--exclude-delivery-contracts`; quote mismatches appear in
+> `excluded.quote_asset_mismatch`, and active filters appear in
+> `filters.quote_assets`. `KAITOUSDC` is additionally a **quarantined** symbol
+> (unreadable source parquet) — do not re-run its migration, auto-fix, or delete
+> it. See `DATA_CONTRACT.md` → *Primary Universe Policy* and `INIT_VERIFY.md`.
 
 Defaults: only `year_only_needs_migration`, excludes mixed / canonical /
 source_missing, and excludes `BTCUSDT` / `ETHUSDT` by default (migrate those mixed

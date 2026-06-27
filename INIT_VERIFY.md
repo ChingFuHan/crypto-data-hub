@@ -148,7 +148,7 @@ unreadable parquet 額外列為 quarantine。
 
 ## F. Migration planner verification
 
-標準命令（`--quote-assets USDT` 為目標旗標，見下方 pending 註記）:
+標準命令（`--quote-assets USDT` 已實作，僅影響 batch planner candidate filtering）:
 
     .venv/bin/python scripts/live_update.py \
       --interval 1m \
@@ -163,11 +163,13 @@ unreadable parquet 額外列為 quarantine。
       --exclude-symbols BTCUSDT ETHUSDT KAITOUSDC \
       --dry-run-batches
 
-> **Pending implementation 註記。** `--quote-assets USDT` 目前**尚未實作**。
-> 在實作前，暫時 workaround：手動排除非 USDT quote symbols（USDC / BUSD），
-> 並用 `--exclude-symbols` 補上已知非 primary symbols（如 `KAITOUSDC`）。
-> 其餘旗標（`--exclude-delivery-contracts` / `--exclude-settled` /
-> `--exclude-non-ascii` / `--exclude-symbols`）已實作。
+> `--quote-assets USDT` 已實作，只影響 current layout migration batch planner
+> candidate filtering，不影響 live daemon / `--once` / startup backfill。
+> 支援 `--quote-assets USDT`、`--quote-assets USDT,USDC`、
+> `--quote-assets "USDT USDC"`；第一版依 symbol suffix 偵測 `USDT` / `USDC` /
+> `BUSD`。delivery contracts 仍需用 `--exclude-delivery-contracts` 排除。
+> quote mismatch 會出現在 `excluded.quote_asset_mismatch`，生效 filter 會出現在
+> `filters.quote_assets`。`KAITOUSDC` 仍是 known quarantined symbol，不重跑、不修復、不刪除。
 
 Pass criteria:
 

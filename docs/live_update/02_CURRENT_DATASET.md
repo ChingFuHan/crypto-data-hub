@@ -284,9 +284,12 @@ recommended_action
 > **Primary universe = USDT quote perpetual。** primary universe 是 Binance
 > USDⓈ-M Futures `PERPETUAL` `quote_asset = USDT`（含已下市 USDT 永續）。
 > Binance UM **不等於只有 USDT pairs**；USDC / BUSD quote pairs、delivery、
-> SETTLED、non-ASCII 都不屬於 primary universe。`--quote-assets USDT` 為目標旗標但
-> **尚未實作（Pending implementation）**；在實作前手動排除非 USDT quote symbols
-> （USDC / BUSD），並用 `--exclude-symbols` 補上已知非 primary symbols（如
+> SETTLED、non-ASCII 都不屬於 primary universe。`--quote-assets USDT` 依 symbol
+> suffix 偵測 quote asset（`USDT` / `USDC` / `BUSD`），只保留指定 quote 的候選；
+> 非指定 quote 的 symbol 進 `excluded.quote_asset_mismatch`（reason
+> `quote_asset_mismatch`，附 `detected_quote_asset`）。delivery 合約以
+> `--exclude-delivery-contracts` 排除（先於 quote filter），避免 `BTCUSDT_230630`
+> 被當成 USDT perpetual。仍建議用 `--exclude-symbols` 補上已知非 primary symbols（如
 > `KAITOUSDC`）。`KAITOUSDC` 是 known quarantined symbol（USDC quote pair + corrupt
 > source parquet）：不重跑 migration、不自動修復、不刪除。migration 前 source
 > parquet readability precheck 失敗即停。見 `DATA_CONTRACT.md` →
@@ -304,8 +307,21 @@ recommended_action
 - `--exclude-settled`：排除含 `SETTLED`（如 `CVXUSDTSETTLED`）。
 - `--exclude-non-ascii`：排除非 ASCII symbol（如 `龙虾USDT`）。
 - `--exclude-symbols A B` / `A,B` / `"A B"`：額外排除指定 symbols。
+- `--quote-assets USDT` / `USDT,USDC` / `"USDT USDC"`：只保留指定 quote asset 的
+  候選（suffix 偵測）。**只影響 batch planner candidate filtering**，不碰 live
+  daemon / `--once` / startup backfill。output `filters.quote_assets` 列出生效清單。
 - `--dry-run-batches`：對每批每顆呼叫 `--migrate-current-layout`（`execute=False`）
   dry-run，回傳結果；**仍不寫任何資料**。
+
+> **Source parquet readability precheck。** `--migrate-current-layout`（dry-run 與
+> `--execute`）migrate 前先檢查該 symbol 目錄底下所有 source parquet
+> （size / head4 / tail4 / parquet magic / pyarrow metadata）。任一不可讀時 status
+> 為 `source_parquet_unreadable`：dry-run **不回 `planned`**、execute **不建 stage /
+> backup、不 promote、不改 source**；`--dry-run-batches` 的 `dry_run_results` 也會
+> surface 此 status。output 含 `source_file_count` / `readable_file_count` /
+> `unreadable_file_count` / `unreadable_files`（每筆 path / size / head4 / tail4 /
+> `parquet_magic_ok` / `read_ok` / error）。`--audit-current-layout` 只檢查 layout，
+> **不保證 parquet readability**。
 
 預設行為：只收 `year_only_needs_migration`、排除 mixed layout / already canonical /
 source_missing，並**預設排除 `BTCUSDT` / `ETHUSDT`**（兩者目前是 mixed，需最後單獨

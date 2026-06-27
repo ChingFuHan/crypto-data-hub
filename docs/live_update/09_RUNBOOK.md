@@ -589,12 +589,15 @@ migration execute flow / live daemon / `--once` / startup backfill。
 > **Primary universe = Binance USDⓈ-M Futures `PERPETUAL` `quote_asset =
 > USDT`**（含已下市 USDT 永續）。Binance UM **不等於只有 USDT pairs**；USDC /
 > BUSD quote pairs、delivery、SETTLED、non-ASCII 都不屬於 primary universe。
-> `--quote-assets USDT` 是目標旗標但**尚未實作（Pending implementation）**；
-> 在實作前手動排除非 USDT quote symbols（USDC / BUSD），並用 `--exclude-symbols`
-> 補上已知非 primary symbols（如 `KAITOUSDC`）。`KAITOUSDC` 同時是 USDC quote
-> pair 與 corrupt source parquet，為 known quarantined symbol：不重跑 migration、
-> 不自動修復、不刪除（見 `DATA_CONTRACT.md` → *Primary Universe Policy*、
-> 根目錄 `INIT_VERIFY.md`）。
+> `--quote-assets USDT` 已實作，只影響 current layout migration batch planner
+> candidate filtering，不影響 live daemon / `--once` / startup backfill。
+> 支援 `--quote-assets USDT`、`--quote-assets USDT,USDC`、
+> `--quote-assets "USDT USDC"`；第一版依 symbol suffix 偵測 `USDT` / `USDC` /
+> `BUSD`。delivery contracts 仍需用 `--exclude-delivery-contracts` 排除；quote
+> mismatch 會出現在 `excluded.quote_asset_mismatch`，生效 filter 會出現在
+> `filters.quote_assets`。`KAITOUSDC` 同時是 USDC quote pair 與 corrupt source
+> parquet，為 known quarantined symbol：不重跑 migration、不自動修復、不刪除
+> （見 `DATA_CONTRACT.md` → *Primary Universe Policy*、根目錄 `INIT_VERIFY.md`）。
 
 行為：reuse candidate planner 取得足夠大的 ranked pool（排序同上），**套用 exclude
 filters 後再切 batch**（避免前段 delivery / settled / non-ascii / excluded symbols

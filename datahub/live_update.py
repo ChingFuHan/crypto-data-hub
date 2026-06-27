@@ -1448,6 +1448,112 @@ def precheck_symbol_layout_migration(
     }
 
 
+# Source parquet readability precheck.
+# A canonical parquet file starts AND ends with the 4-byte magic ``PAR1``; a
+# truncated/corrupt footer (e.g. the known-bad KAITOUSDC current part) keeps the
+# header but loses the footer magic, so pyarrow cannot read its metadata.
+PARQUET_MAGIC = b"PAR1"
+
+
+def _readable_bytes_token(raw: bytes) -> str:
+    """Render up to 4 raw bytes as ASCII when printable, else a hex token.
+
+    ``PAR1`` stays ``"PAR1"`` so a healthy magic is obvious; a corrupt tail like
+    ``b"\\x00\\x12\\xff\\x03"`` becomes ``"hex:0012ff03"`` instead of mojibake.
+    """
+    if raw and all(0x20 <= b < 0x7F for b in raw):
+        return raw.decode("ascii")
+    return "hex:" + raw.hex()
+
+
+def _inspect_one_parquet(path: Path) -> dict[str, Any]:
+    """Inspect a single parquet file's readability without trusting its content.
+
+    Records size, head/tail magic bytes, whether both magics are intact, and
+    whether pyarrow can read the footer metadata (with ``num_rows`` if so). Never
+    writes, moves, or deletes; on any error it returns ``read_ok=False`` with the
+    error text rather than raising.
+    """
+    info: dict[str, Any] = {
+        "path": str(path),
+        "size": None,
+        "head4": None,
+        "tail4": None,
+        "parquet_magic_ok": False,
+        "read_ok": False,
+        "num_rows": None,
+        "error": None,
+    }
+    try:
+        size = path.stat().st_size
+        info["size"] = size
+        with open(path, "rb") as handle:
+            head = handle.read(4)
+            if size >= 8:
+                handle.seek(-4, os.SEEK_END)
+                tail = handle.read(4)
+            else:
+                # File too small to hold both magics independently.
+                tail = head[-4:]
+        info["head4"] = _readable_bytes_token(head)
+        info["tail4"] = _readable_bytes_token(tail)
+        info["parquet_magic_ok"] = head == PARQUET_MAGIC and tail == PARQUET_MAGIC
+    except OSError as exc:
+        info["error"] = f"stat/read failed: {exc}"
+        return info
+
+    try:
+        metadata = pq.ParquetFile(path).metadata
+        info["num_rows"] = int(metadata.num_rows)
+        info["read_ok"] = True
+    except Exception as exc:
+        info["error"] = str(exc)
+        info["read_ok"] = False
+    return info
+
+
+def inspect_symbol_parquet_readability(
+    interval: str,
+    symbol: str,
+    paths: LiveUpdatePaths | None = None,
+) -> dict[str, Any]:
+    """Read-only readability precheck for every source parquet under one symbol.
+
+    Scans ``symbol=<SYMBOL>/`` in the current dataset and reports, per file, the
+    size / head4 / tail4 / parquet_magic_ok / read_ok / num_rows / error. It only
+    reads bytes and parquet footers -- it never moves, deletes, overwrites, or
+    rewrites data and never contacts Binance. A symbol with any unreadable source
+    parquet must NOT be migrated (no plan=planned, no stage, no backup, no
+    promote); callers gate on ``unreadable_file_count``.
+    """
+    validate_interval(interval)
+    require_pyarrow()
+    resolver = paths or LiveUpdatePaths()
+    normalized = symbol.upper()
+    symbol_root = resolver.current_parquet_root(interval) / f"symbol={normalized}"
+
+    files: list[dict[str, Any]] = []
+    if symbol_root.exists():
+        for path, _has_month in _symbol_partition_files(symbol_root):
+            files.append(_inspect_one_parquet(path))
+
+    unreadable = [info for info in files if not info["read_ok"]]
+    warnings = [
+        f"unreadable source parquet: {info['path']} ({info['error']})"
+        for info in unreadable
+    ]
+    return {
+        "symbol": normalized,
+        "interval": interval,
+        "source_file_count": len(files),
+        "readable_file_count": len(files) - len(unreadable),
+        "unreadable_file_count": len(unreadable),
+        "files": files,
+        "unreadable_files": unreadable,
+        "warnings": warnings,
+    }
+
+
 def build_current_layout_migration_precheck(
     interval: str,
     symbols: list[str],
@@ -1596,14 +1702,36 @@ _DELIVERY_CONTRACT_RE = re.compile(r"_[0-9]{6}$")
 DEFAULT_CANDIDATE_SCAN_LIMIT = 100_000
 
 
+# Quote assets recognized by suffix. The primary universe is USDT-quoted; USDC /
+# BUSD pairs are NOT part of normal primary flow (e.g. KAITOUSDC is a USDC pair).
+KNOWN_QUOTE_ASSETS = ("USDT", "USDC", "BUSD")
+
+
 def _is_delivery_contract_symbol(symbol: str) -> bool:
     return bool(_DELIVERY_CONTRACT_RE.search(symbol))
+
+
+def _detect_quote_asset(symbol: str) -> str | None:
+    """Best-effort quote asset from a symbol's suffix (first version: suffix only).
+
+    Strips any ``_YYMMDD`` delivery suffix first so a quarterly contract is keyed
+    off its underlying pair (``BTCUSDT_230630`` -> base ``BTCUSDT`` -> ``USDT``);
+    delivery contracts are themselves excluded separately via
+    ``--exclude-delivery-contracts``. Returns ``None`` when no known quote suffix
+    matches.
+    """
+    base = symbol.split("_", 1)[0].upper()
+    for quote in KNOWN_QUOTE_ASSETS:
+        if base.endswith(quote):
+            return quote
+    return None
 
 
 def _batch_excluded_entry(candidate: dict[str, Any], reason: str) -> dict[str, Any]:
     return {
         "symbol": candidate["symbol"],
         "reason": reason,
+        "detected_quote_asset": _detect_quote_asset(candidate["symbol"]),
         "row_count": candidate["row_count"],
         "expected_canonical_partition_count": candidate[
             "expected_canonical_partition_count"
@@ -1623,6 +1751,7 @@ def plan_current_layout_migration_batches(
     exclude_settled: bool = False,
     exclude_non_ascii: bool = False,
     exclude_symbols: list[str] | None = None,
+    quote_assets: list[str] | None = None,
     dry_run_batches: bool = False,
 ) -> dict[str, Any]:
     """Read-only batch planner for current layout migration.
@@ -1651,6 +1780,8 @@ def plan_current_layout_migration_batches(
 
     explicit_excludes = {s.strip().upper() for s in (exclude_symbols or []) if s.strip()}
     default_excludes = {s.upper() for s in DEFAULT_BATCH_EXCLUDED_SYMBOLS}
+    quote_filter = [q.strip().upper() for q in (quote_assets or []) if q.strip()]
+    quote_filter_set = set(quote_filter)
 
     # Scan a deliberately large candidate pool (include mixed so mixed symbols can
     # be reported as excluded rather than silently absent), apply filters, THEN
@@ -1677,6 +1808,7 @@ def plan_current_layout_migration_batches(
         "explicit_symbols": [],
         "mixed_layout": [],
         "default_symbols": [],
+        "quote_asset_mismatch": [],
     }
     selected: list[dict[str, Any]] = []
     want = batch_size * max_batches
@@ -1705,6 +1837,12 @@ def plan_current_layout_migration_batches(
         elif exclude_non_ascii and not symbol.isascii():
             excluded["non_ascii"].append(
                 _batch_excluded_entry(candidate, "non_ascii")
+            )
+        elif quote_filter_set and _detect_quote_asset(symbol) not in quote_filter_set:
+            # Quote-asset filter checked AFTER delivery/settled/non-ascii so those
+            # keep their specific reason; a USDC pair like KAITOUSDC lands here.
+            excluded["quote_asset_mismatch"].append(
+                _batch_excluded_entry(candidate, "quote_asset_mismatch")
             )
         else:
             if len(selected) < want:
@@ -1766,6 +1904,7 @@ def plan_current_layout_migration_batches(
             "exclude_settled": bool(exclude_settled),
             "exclude_non_ascii": bool(exclude_non_ascii),
             "exclude_symbols": sorted(explicit_excludes),
+            "quote_assets": quote_filter or None,
             "default_excluded_symbols": list(DEFAULT_BATCH_EXCLUDED_SYMBOLS),
             "include_statuses": [CURRENT_LAYOUT_MIGRATION_YEAR_ONLY],
             "exclude_mixed_layout": True,
@@ -1783,6 +1922,7 @@ def plan_current_layout_migration_batches(
 
 # Single-symbol layout migration statuses.
 MIGRATE_SOURCE_MISSING = "source_missing"
+MIGRATE_SOURCE_PARQUET_UNREADABLE = "source_parquet_unreadable"
 MIGRATE_PLANNED = "planned"
 MIGRATE_DONE = "migrated"
 MIGRATE_VERIFICATION_FAILED = "verification_failed"
@@ -1843,6 +1983,45 @@ def migrate_current_symbol_layout(
         )
 
     source = resolver.current_parquet_root(interval) / f"symbol={normalized}"
+
+    # Source parquet readability precheck: a single corrupt/truncated parquet must
+    # abort the migration BEFORE any plan/stage/backup/promote. Reading garbage
+    # open_times would otherwise silently undercount rows and "migrate" away data.
+    readability = inspect_symbol_parquet_readability(interval, normalized, resolver)
+    if readability["unreadable_file_count"] > 0:
+        warnings = list(readability["warnings"])
+        warnings.append(
+            "source parquet unreadable; refusing to plan/stage/backup/promote "
+            "migration (no source modified)"
+        )
+        return {
+            "status": MIGRATE_SOURCE_PARQUET_UNREADABLE,
+            "dry_run": not execute,
+            "execute": bool(execute),
+            "interval": interval,
+            "symbol": normalized,
+            "source_path": str(source),
+            "stage_path": None,
+            "backup_path": None,
+            "row_count_before": None,
+            "row_count_after": None,
+            "duplicate_open_time_before": None,
+            "duplicate_replaced_count": None,
+            "duplicate_open_time_after": None,
+            "min_open_time_before": None,
+            "max_open_time_before": None,
+            "min_open_time_after": None,
+            "max_open_time_after": None,
+            "expected_canonical_partition_count": None,
+            "written_partition_count": None,
+            "written_partitions": [],
+            "source_file_count": readability["source_file_count"],
+            "readable_file_count": readability["readable_file_count"],
+            "unreadable_file_count": readability["unreadable_file_count"],
+            "unreadable_files": readability["unreadable_files"],
+            "warnings": warnings,
+        }
+
     precheck = precheck_symbol_layout_migration(interval, normalized, resolver)
     expected = precheck["expected_canonical_partitions"]
     expected_count = precheck["expected_canonical_partition_count"]
@@ -1874,6 +2053,10 @@ def migrate_current_symbol_layout(
         "expected_canonical_partition_count": expected_count,
         "written_partition_count": None,
         "written_partitions": [],
+        "source_file_count": readability["source_file_count"],
+        "readable_file_count": readability["readable_file_count"],
+        "unreadable_file_count": readability["unreadable_file_count"],
+        "unreadable_files": readability["unreadable_files"],
         "warnings": warnings,
     }
 
@@ -4037,6 +4220,32 @@ def parse_symbols_arg(raw: str | list[str] | None) -> list[str]:
     return parsed
 
 
+def parse_quote_assets_arg(raw: str | list[str] | None) -> list[str]:
+    """Normalize ``--quote-assets`` CLI input into an upper-cased token list.
+
+    Accepts argparse ``nargs`` results, a single string, or ``None``; splits each
+    token on commas and whitespace so ``USDT``, ``"USDT USDC"`` and ``USDT,USDC``
+    are equivalent. Unlike :func:`parse_symbols_arg` there is no ``all`` sentinel.
+    Order is preserved and duplicates dropped.
+    """
+    if raw is None:
+        tokens: list[str] = []
+    elif isinstance(raw, str):
+        tokens = [raw]
+    else:
+        tokens = list(raw)
+
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        for chunk in str(token).replace(",", " ").split():
+            normalized = chunk.strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                parsed.append(normalized)
+    return parsed
+
+
 def fetch_um_perpetual_usdt_symbols(
     base_url: str = BINANCE_REST_BASE_URL,
     timeout: float = 15.0,
@@ -4327,6 +4536,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "extra symbols to exclude from batches; accepts space/comma-separated "
             'or quoted lists, e.g. --exclude-symbols BTCUSDT,ETHUSDT'
+        ),
+    )
+    parser.add_argument(
+        "--quote-assets",
+        nargs="*",
+        default=None,
+        metavar="QUOTE",
+        help=(
+            "restrict batch candidates to these quote assets (suffix match); "
+            "accepts space/comma-separated or quoted lists, e.g. "
+            "--quote-assets USDT or --quote-assets USDT,USDC. Affects ONLY the "
+            "batch planner -- never the live daemon, --once, or startup backfill"
         ),
     )
     parser.add_argument(
@@ -4763,6 +4984,7 @@ def run(args: argparse.Namespace) -> int:
             exclude_settled=args.exclude_settled,
             exclude_non_ascii=args.exclude_non_ascii,
             exclude_symbols=parse_symbols_arg(args.exclude_symbols),
+            quote_assets=parse_quote_assets_arg(args.quote_assets),
             dry_run_batches=args.dry_run_batches,
         )
         payload_batches = {

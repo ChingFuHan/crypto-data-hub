@@ -125,8 +125,8 @@ docs/live_update/09_RUNBOOK.md
   USDT`（含已下市的 USDT 永續）。Binance UM **不等於只有 USDT pairs**：USDC /
   BUSD quote pairs、delivery（`BTCUSDT_230630`）、SETTLED、non-ASCII 都**不**屬於
   primary universe，不進 normal migration / trading research flow。標準 planner
-  命令（read-only、dry-run；`--quote-assets USDT` 為**目標旗標，pending
-  implementation**）：
+  命令（read-only、dry-run；`--quote-assets USDT` 已實作，僅影響 batch planner
+  candidate filtering）：
 
   ```bash
   .venv/bin/python scripts/live_update.py \
@@ -143,12 +143,15 @@ docs/live_update/09_RUNBOOK.md
     --dry-run-batches
   ```
 
-  > `--quote-assets USDT` 尚未實作（Pending implementation）。在實作前手動排除
-  > 非 USDT quote symbols（USDC / BUSD），並用 `--exclude-symbols` 補上已知非
-  > primary symbols（如 `KAITOUSDC`）。`KAITOUSDC` 同時是 USDC quote pair 與
-  > corrupt source parquet，為 known quarantined symbol：不重跑 migration、
-  > 不自動修復、不刪除（見 `DATA_CONTRACT.md` → *Primary Universe Policy*、
-  > `INIT_VERIFY.md`）。
+  > `--quote-assets USDT` 已實作，只影響 current layout migration batch planner
+  > candidate filtering，不影響 live daemon / `--once` / startup backfill。
+  > 支援 `--quote-assets USDT`、`--quote-assets USDT,USDC`、
+  > `--quote-assets "USDT USDC"`；第一版依 symbol suffix 偵測 `USDT` / `USDC` /
+  > `BUSD`。delivery contracts 仍需用 `--exclude-delivery-contracts` 排除；quote
+  > mismatch 會出現在 `excluded.quote_asset_mismatch`，生效 filter 會出現在
+  > `filters.quote_assets`。`KAITOUSDC` 同時是 USDC quote pair 與 corrupt source
+  > parquet，為 known quarantined symbol：不重跑 migration、不自動修復、不刪除
+  > （見 `DATA_CONTRACT.md` → *Primary Universe Policy*、`INIT_VERIFY.md`）。
 - **Single-symbol layout migration（real）。** `--migrate-current-layout`
   （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
   canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證
