@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
+import re
 import shutil
 import socket
 import time
@@ -1579,6 +1580,203 @@ def list_current_layout_migration_candidates(
         "note": (
             "read-only planner; lists candidates only, never migrates, writes "
             "nothing and never contacts Binance"
+        ),
+    }
+
+
+# Controlled batch planner.
+# Symbols are always excluded by default, no flag re-includes them: they are
+# currently mixed-layout and must be migrated last, on their own.
+DEFAULT_BATCH_EXCLUDED_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+# Quarterly/delivery contracts end in ``_YYMMDD`` (six digits), e.g.
+# ``BTCUSDT_230630`` / ``ETHUSDT_260925``.
+_DELIVERY_CONTRACT_RE = re.compile(r"_[0-9]{6}$")
+# Large candidate pool ceiling used only when --candidate-scan-limit is omitted;
+# big enough to cover the full local current dataset symbol universe.
+DEFAULT_CANDIDATE_SCAN_LIMIT = 100_000
+
+
+def _is_delivery_contract_symbol(symbol: str) -> bool:
+    return bool(_DELIVERY_CONTRACT_RE.search(symbol))
+
+
+def _batch_excluded_entry(candidate: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "symbol": candidate["symbol"],
+        "reason": reason,
+        "row_count": candidate["row_count"],
+        "expected_canonical_partition_count": candidate[
+            "expected_canonical_partition_count"
+        ],
+    }
+
+
+def plan_current_layout_migration_batches(
+    interval: str,
+    paths: LiveUpdatePaths | None = None,
+    *,
+    batch_size: int = 10,
+    max_batches: int = 1,
+    max_row_count: int = 0,
+    candidate_scan_limit: int = 0,
+    exclude_delivery_contracts: bool = False,
+    exclude_settled: bool = False,
+    exclude_non_ascii: bool = False,
+    exclude_symbols: list[str] | None = None,
+    dry_run_batches: bool = False,
+) -> dict[str, Any]:
+    """Read-only batch planner for current layout migration.
+
+    Reuses :func:`list_current_layout_migration_candidates` for the candidate
+    pool and its ranking, applies exclude filters, then slices the survivors into
+    ``max_batches`` batches of ``batch_size`` symbols. It NEVER writes parquet,
+    stage, backup, jsonl, state, or registry, and never contacts Binance. When
+    ``dry_run_batches`` is set each planned symbol is passed through
+    :func:`migrate_current_symbol_layout` with ``execute=False`` (still a pure
+    dry-run that writes nothing). The emitted ``commands`` strings are reference
+    output only -- this planner never executes a migration.
+    """
+    validate_interval(interval)
+    if batch_size <= 0:
+        raise LiveUpdateCommandError("--batch-size must be a positive integer")
+    if max_batches <= 0:
+        raise LiveUpdateCommandError("--max-batches must be a positive integer")
+    if max_row_count < 0:
+        raise LiveUpdateCommandError("--max-row-count must be a positive integer")
+    if candidate_scan_limit < 0:
+        raise LiveUpdateCommandError(
+            "--candidate-scan-limit must be a positive integer"
+        )
+    resolver = paths or LiveUpdatePaths()
+
+    explicit_excludes = {s.strip().upper() for s in (exclude_symbols or []) if s.strip()}
+    default_excludes = {s.upper() for s in DEFAULT_BATCH_EXCLUDED_SYMBOLS}
+
+    # Scan a deliberately large candidate pool (include mixed so mixed symbols can
+    # be reported as excluded rather than silently absent), apply filters, THEN
+    # slice -- so delivery/settled/non-ascii/excluded symbols crowding the front
+    # of the ranking never starve the usable plain symbols.
+    scan_limit = candidate_scan_limit if candidate_scan_limit > 0 else DEFAULT_CANDIDATE_SCAN_LIMIT
+    pool_result = list_current_layout_migration_candidates(
+        interval,
+        resolver,
+        limit=scan_limit,
+        max_row_count=max_row_count,
+        include_mixed=True,
+    )
+    pool = pool_result["candidates"]
+    total_matched = pool_result["total_matched"]
+    hit_candidate_scan_limit = (
+        candidate_scan_limit > 0 and total_matched > candidate_scan_limit
+    )
+
+    excluded: dict[str, list[dict[str, Any]]] = {
+        "delivery_contracts": [],
+        "settled": [],
+        "non_ascii": [],
+        "explicit_symbols": [],
+        "mixed_layout": [],
+        "default_symbols": [],
+    }
+    selected: list[dict[str, Any]] = []
+    want = batch_size * max_batches
+    for candidate in pool:
+        symbol = candidate["symbol"]
+        if symbol in default_excludes:
+            excluded["default_symbols"].append(
+                _batch_excluded_entry(candidate, "default_excluded_symbol")
+            )
+        elif symbol in explicit_excludes:
+            excluded["explicit_symbols"].append(
+                _batch_excluded_entry(candidate, "explicit_excluded_symbol")
+            )
+        elif candidate["status"] == CURRENT_LAYOUT_MIGRATION_MIXED:
+            excluded["mixed_layout"].append(
+                _batch_excluded_entry(candidate, "mixed_layout")
+            )
+        elif exclude_delivery_contracts and _is_delivery_contract_symbol(symbol):
+            excluded["delivery_contracts"].append(
+                _batch_excluded_entry(candidate, "delivery_contract")
+            )
+        elif exclude_settled and "SETTLED" in symbol:
+            excluded["settled"].append(
+                _batch_excluded_entry(candidate, "settled")
+            )
+        elif exclude_non_ascii and not symbol.isascii():
+            excluded["non_ascii"].append(
+                _batch_excluded_entry(candidate, "non_ascii")
+            )
+        else:
+            if len(selected) < want:
+                selected.append(candidate)
+            # Keep scanning even once `want` is reached so the result is stable;
+            # the slice below bounds the actual batches.
+
+    selected = selected[:want]
+    batches: list[dict[str, Any]] = []
+    for batch_index in range(max_batches):
+        chunk = selected[batch_index * batch_size:(batch_index + 1) * batch_size]
+        if not chunk:
+            break
+        symbols = [c["symbol"] for c in chunk]
+        row_counts = [c["row_count"] for c in chunk]
+        partition_counts = [c["expected_canonical_partition_count"] for c in chunk]
+        symbols_arg = " ".join(symbols)
+        batch: dict[str, Any] = {
+            "batch_no": batch_index + 1,
+            "symbol_count": len(symbols),
+            "symbols": symbols,
+            "total_row_count": sum(row_counts),
+            "total_expected_canonical_partition_count": sum(partition_counts),
+            "max_symbol_row_count": max(row_counts),
+            "max_expected_canonical_partition_count": max(partition_counts),
+            "commands": {
+                "dry_run": (
+                    f'.venv/bin/python scripts/live_update.py --interval {interval} '
+                    f'--symbols "{symbols_arg}" --migrate-current-layout'
+                ),
+                "execute": (
+                    f'.venv/bin/python scripts/live_update.py --interval {interval} '
+                    f'--symbols "{symbols_arg}" --migrate-current-layout --execute'
+                ),
+            },
+        }
+        if dry_run_batches:
+            batch["dry_run_results"] = [
+                migrate_current_symbol_layout(interval, symbol, resolver, execute=False)
+                for symbol in symbols
+            ]
+        batches.append(batch)
+
+    return {
+        "interval": interval,
+        "mode": "plan_current_layout_migration_batches",
+        "read_only": True,
+        "execute": False,
+        "dry_run_batches": bool(dry_run_batches),
+        "filters": {
+            "batch_size": batch_size,
+            "max_batches": max_batches,
+            "max_row_count": max_row_count if max_row_count > 0 else None,
+            "candidate_scan_limit": (
+                candidate_scan_limit if candidate_scan_limit > 0 else None
+            ),
+            "hit_candidate_scan_limit": hit_candidate_scan_limit,
+            "exclude_delivery_contracts": bool(exclude_delivery_contracts),
+            "exclude_settled": bool(exclude_settled),
+            "exclude_non_ascii": bool(exclude_non_ascii),
+            "exclude_symbols": sorted(explicit_excludes),
+            "default_excluded_symbols": list(DEFAULT_BATCH_EXCLUDED_SYMBOLS),
+            "include_statuses": [CURRENT_LAYOUT_MIGRATION_YEAR_ONLY],
+            "exclude_mixed_layout": True,
+        },
+        "candidate_count_before_filters": len(pool),
+        "candidate_count_after_filters": len(selected),
+        "excluded": excluded,
+        "batches": batches,
+        "note": (
+            "read-only batch planner; never executes migration and never "
+            "contacts Binance"
         ),
     }
 
@@ -4076,6 +4274,69 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print only a space-separated symbol list (for --symbols)",
     )
+    parser.add_argument(
+        "--plan-current-layout-migration-batches",
+        action="store_true",
+        help=(
+            "read-only batch planner for current layout migration; slices ranked "
+            "year-only candidates into batches. Plan / dry-run only -- never "
+            "executes a migration and never contacts Binance"
+        ),
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="symbols per batch (default 10; must be a positive integer)",
+    )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=1,
+        help="max batches to emit (default 1; must be a positive integer)",
+    )
+    parser.add_argument(
+        "--candidate-scan-limit",
+        type=int,
+        default=0,
+        help=(
+            "limit how many ranked raw candidates the batch planner scans "
+            "(0 = scan the full local candidate pool)"
+        ),
+    )
+    parser.add_argument(
+        "--exclude-delivery-contracts",
+        action="store_true",
+        help="exclude delivery/quarterly contracts matching _YYMMDD (e.g. BTCUSDT_230630)",
+    )
+    parser.add_argument(
+        "--exclude-settled",
+        action="store_true",
+        help="exclude symbols containing SETTLED (e.g. CVXUSDTSETTLED)",
+    )
+    parser.add_argument(
+        "--exclude-non-ascii",
+        action="store_true",
+        help="exclude non-ASCII symbols",
+    )
+    parser.add_argument(
+        "--exclude-symbols",
+        nargs="*",
+        default=None,
+        metavar="SYMBOL",
+        help=(
+            "extra symbols to exclude from batches; accepts space/comma-separated "
+            'or quoted lists, e.g. --exclude-symbols BTCUSDT,ETHUSDT'
+        ),
+    )
+    parser.add_argument(
+        "--dry-run-batches",
+        action="store_true",
+        help=(
+            "for each planned batch, run migrate-current-layout dry-runs "
+            "(execute=False); still writes nothing"
+        ),
+    )
     return parser
 
 
@@ -4223,6 +4484,40 @@ def run(args: argparse.Namespace) -> int:
         seed_dataset_root=Path(args.seed_dataset_root),
         current_dataset_root=Path(args.current_dataset_root),
     )
+    if args.plan_current_layout_migration_batches:
+        # Independent read-only batch planner mode -- validate isolation BEFORE any
+        # other mode dispatch runs. It never writes parquet, stage, backup, jsonl,
+        # state, or registry, never executes a migration, and never contacts
+        # Binance. It must NOT be combined with any other mode or with --symbols
+        # (which would mislead into thinking it scopes the plan).
+        incompatible = {
+            "--migrate-current-layout": args.migrate_current_layout,
+            "--audit-current-layout": args.audit_current_layout,
+            "--plan-current-layout-migration": args.plan_current_layout_migration,
+            "--list-current-layout-migration-candidates": (
+                args.list_current_layout_migration_candidates
+            ),
+            "--initialize-current-dataset": args.initialize_current_dataset,
+            "--once": args.once,
+            "--run-startup-backfill-once": args.run_startup_backfill_once,
+        }
+        active = [flag for flag, on in incompatible.items() if on]
+        if active:
+            raise LiveUpdateCommandError(
+                "--plan-current-layout-migration-batches is an independent mode "
+                f"and cannot be combined with: {', '.join(active)}"
+            )
+        if args.symbols is not None:
+            raise LiveUpdateCommandError(
+                "--plan-current-layout-migration-batches does not accept --symbols; "
+                "it always scans the local current dataset candidate pool"
+            )
+        if args.interval == "all":
+            raise LiveUpdateCommandError(
+                "--plan-current-layout-migration-batches requires a single concrete "
+                "--interval (not --interval all)"
+            )
+
     if args.describe_layout:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -4454,6 +4749,29 @@ def run(args: argparse.Namespace) -> int:
             **plan,
         }
         print(pretty_json(payload_candidates), end="")
+        return 0
+
+    if args.plan_current_layout_migration_batches:
+        plan = plan_current_layout_migration_batches(
+            args.interval,
+            paths,
+            batch_size=args.batch_size,
+            max_batches=args.max_batches,
+            max_row_count=args.max_row_count,
+            candidate_scan_limit=args.candidate_scan_limit,
+            exclude_delivery_contracts=args.exclude_delivery_contracts,
+            exclude_settled=args.exclude_settled,
+            exclude_non_ascii=args.exclude_non_ascii,
+            exclude_symbols=parse_symbols_arg(args.exclude_symbols),
+            dry_run_batches=args.dry_run_batches,
+        )
+        payload_batches = {
+            "schema_version": SCHEMA_VERSION,
+            "dataset_version": DATASET_VERSION,
+            "requested_interval": args.interval,
+            **plan,
+        }
+        print(pretty_json(payload_batches), end="")
         return 0
 
     # All other commands require symbol resolution

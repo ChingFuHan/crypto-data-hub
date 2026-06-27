@@ -561,6 +561,54 @@ SYMS=$(.venv/bin/python scripts/live_update.py --interval 1m \
 `BTCUSDT` / `ETHUSDT` 等 mixed 預設排除，year-only migration 穩定後再用
 `--include-mixed` 處理。
 
+### Controlled batch planner（自動切批，plan / dry-run only）
+
+不想再手動貼 batch 006 / 007 / 008 時，用
+`--plan-current-layout-migration-batches` 自動把候選切成多批。第一版**只
+plan / dry-run，不 execute**：**只讀**，不寫 parquet / stage / backup / jsonl /
+state / registry，**不接 Binance**，不修改 `dataset_registry.json`，也不碰既有
+migration execute flow / live daemon / `--once` / startup backfill。
+
+普通 symbols 建議參數：
+
+```bash
+.venv/bin/python scripts/live_update.py \
+  --interval 1m \
+  --plan-current-layout-migration-batches \
+  --batch-size 10 \
+  --max-row-count 300000 \
+  --max-batches 5 \
+  --exclude-delivery-contracts \
+  --exclude-settled \
+  --exclude-non-ascii \
+  --exclude-symbols BTCUSDT ETHUSDT \
+  --dry-run-batches
+```
+
+行為：reuse candidate planner 取得足夠大的 ranked pool（排序同上），**套用 exclude
+filters 後再切 batch**（避免前段 delivery / settled / non-ascii / excluded symbols
+佔滿而漏掉普通 symbols）。預設只收 `year_only_needs_migration`，排除 mixed /
+canonical / source_missing，並**預設排除 `BTCUSDT` / `ETHUSDT`**。`--dry-run-batches`
+對每顆跑 `--migrate-current-layout` `execute=False` dry-run，**仍不寫資料**。
+`--candidate-scan-limit N` 命中時 output 標示 `filters.hit_candidate_scan_limit = true`。
+
+每批 output 含 `symbols` / `symbol_count` / `total_row_count` /
+`total_expected_canonical_partition_count` / `max_*` 與 `commands.{dry_run,execute}`。
+`commands.execute` **只是參考字串，本 CLI 不會自己 execute**；第一版**沒有**
+`--execute-batches` / `--run-batches`。確認 batches 後，**手動**逐批複製
+`commands.execute` 跑 `--migrate-current-layout --execute`、逐批驗證 continuity
+（continuity 只在真實 execute 後處理，本 planner 不跑）。
+
+獨立 mode（違反即 fail fast、不讀寫資料）：不得與 `--migrate-current-layout` /
+`--audit-current-layout` / `--plan-current-layout-migration` /
+`--list-current-layout-migration-candidates` / `--initialize-current-dataset` /
+`--once` / `--run-startup-backfill-once` 混用，不接受 `--symbols`、`--interval all`、
+invalid `--batch-size` / `--max-batches` / `--max-row-count` / `--candidate-scan-limit`。
+
+注意：delivery / SETTLED / non-ASCII / `BTCUSDT` / `ETHUSDT` 都分開處理；不要全市場
+execute；不要直接把 `--batch-size` 拉到 100（普通 symbols 先 10，穩定後再考慮 20）；
+`row_count > 300000` 的大 symbol 分小批或單顆。
+
 ### Single-symbol migration（real，dry-run by default）
 
 `--migrate-current-layout` 真正把指定 symbol 轉成 canonical year/month。預設

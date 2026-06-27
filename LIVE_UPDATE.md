@@ -104,6 +104,22 @@ docs/live_update/09_RUNBOOK.md
   symbol。選項：`--limit`、`--max-row-count`、`--include-mixed`、`--status`、
   `--output-symbols-only`（輸出可直接接 `--symbols`）。建議每批 `--limit 10` /
   `--max-row-count` 控制大小；`BTCUSDT` / `ETHUSDT` mixed 先排除，year-only 穩定後再處理。
+- **Controlled batch planner（自動切批，plan / dry-run only）。**
+  `--plan-current-layout-migration-batches`（`plan_current_layout_migration_batches`）
+  把候選 symbols **自動切成多批**，免手動貼 batch。第一版**只 plan / dry-run，不 execute**：
+  reuse candidate planner 取得足夠大的 ranked pool、套用 exclude filters 後再切 batch
+  （`--batch-size` 預設 10、`--max-batches` 預設 1、`--max-row-count`、`--candidate-scan-limit`）。
+  **只讀**，不寫 parquet / stage / backup / jsonl / state / registry，**不接 Binance**，
+  不修改 `dataset_registry.json`。預設只收 `year_only_needs_migration`、排除 mixed /
+  canonical / source_missing，並**預設排除 `BTCUSDT` / `ETHUSDT`**。可選
+  `--exclude-delivery-contracts`（`_YYMMDD`）、`--exclude-settled`、`--exclude-non-ascii`、
+  `--exclude-symbols A B`。`--dry-run-batches` 對每顆跑 `--migrate-current-layout`
+  `execute=False` dry-run，**仍不寫資料**。output 的 `commands.execute` 只是參考字串，
+  **本 CLI 不會自己 execute**；第一版**沒有** `--execute-batches` / `--run-batches`，
+  不碰 migration execute flow / live daemon / `--once` / startup backfill。獨立 mode：
+  不得與其他 current-layout / `--once` / `--run-startup-backfill-once` /
+  `--initialize-current-dataset` 混用，亦不接受 `--symbols`、`--interval all`、invalid args
+  （皆 fail fast）。
 - **Single-symbol layout migration（real）。** `--migrate-current-layout`
   （`migrate_current_symbol_layout`）真正把指定 symbol 從 year-only / mixed 轉成
   canonical year/month：依 `open_time` 合併排序去重 → 寫 stage dir → 驗證

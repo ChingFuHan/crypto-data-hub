@@ -298,6 +298,35 @@ Keep batches small (`--limit 10` / `--max-row-count`), migrate, verify, repeat.
 `BTCUSDT` / `ETHUSDT` (mixed) are excluded by default — handle them later with
 `--include-mixed` once year-only migration is proven.
 
+To auto-slice candidates into batches instead of pasting them by hand, use the
+**controlled batch planner** `--plan-current-layout-migration-batches`. This first
+version is **plan / dry-run only — it never executes a migration**, never writes
+parquet / stage / backup / jsonl / state / registry, and never contacts Binance
+(it does not touch `dataset_registry.json`). It reuses the candidate planner, pulls
+a large ranked pool, applies the exclude filters, then slices the survivors into
+batches:
+
+```bash
+.venv/bin/python scripts/live_update.py --interval 1m \
+  --plan-current-layout-migration-batches \
+  --batch-size 10 --max-row-count 300000 --max-batches 5 \
+  --exclude-delivery-contracts --exclude-settled --exclude-non-ascii \
+  --exclude-symbols BTCUSDT ETHUSDT \
+  --dry-run-batches
+```
+
+Defaults: only `year_only_needs_migration`, excludes mixed / canonical /
+source_missing, and excludes `BTCUSDT` / `ETHUSDT` by default (migrate those mixed
+symbols last, on their own). `--dry-run-batches` runs each symbol through
+`--migrate-current-layout` with `execute=False` — still writing nothing. The
+emitted `commands.execute` strings are reference only; **this CLI does not execute
+them** — there is no `--execute-batches`. Copy the per-batch execute command
+yourself, run it, verify, repeat. It is an independent mode: it rejects `--symbols`,
+`--interval all`, invalid numeric args, and any other current-layout / `--once` /
+backfill / init mode (fail fast). Keep `--batch-size` at 10 for plain symbols (20
+only once proven); split symbols with `row_count > 300000` into smaller batches or
+one at a time; never run the whole market at once.
+
 To actually migrate one symbol to canonical year/month, use
 `--migrate-current-layout` (dry-run by default; add `--execute` to write). It
 requires explicit `--symbols` and a single concrete `--interval` (`all` rejected
